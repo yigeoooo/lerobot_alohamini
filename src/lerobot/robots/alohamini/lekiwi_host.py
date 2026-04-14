@@ -52,25 +52,22 @@ class LeKiwiHost:
 def main():
     parser = argparse.ArgumentParser(description="Run AlohaMini LeKiwi host process")
     parser.add_argument(
-        "--arm_profile",
-        type=str,
-        default="so-arm-5dof",
-        choices=["so-arm-5dof", "am-arm-6dof"],
-        help="Follower arm profile selector.",
-    )
-    parser.add_argument(
         "--robot_model",
         type=str,
         default="alohamini1",
-        choices=["alohamini1", "alohamini2"],
-        help="Robot model: alohamini1 (lead=84 mm/rev) or alohamini2 (lead=120 mm/rev).",
+        choices=["alohamini1", "alohamini2", "alohamini2pro"],
+        help=(
+            "Robot model — drives arm DOF, motor models, lift motor, and lead screw pitch.\n"
+            "  alohamini1   : so-arm-5dof,  all sts3215,               lift sts3215, lead=84 mm/rev\n"
+            "  alohamini2   : am-arm-6dof,  sts3215/sts3095,            lift sts3095, lead=131 mm/rev\n"
+            "  alohamini2pro: am-arm-6dof,  sts3250/sts3095 (upgraded), lift sts3095, lead=131 mm/rev"
+        ),
     )
     args = parser.parse_args()
 
     logging.info("Configuring LeKiwi")
     robot_config = LeKiwiConfig()
     robot_config.id = "AlohaMiniRobot"
-    robot_config.arm_profile = args.arm_profile
     robot_config.robot_model = args.robot_model
     robot = LeKiwi(robot_config)
 

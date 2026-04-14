@@ -43,6 +43,36 @@ logger = logging.getLogger(__name__)
 from .lift_axis import LiftAxis, LiftAxisConfig
 
 
+# Per-model hardware specifications.
+# standard_motor : motor model used for all arm joints except heavy-load joints in 6dof,
+#                  and for all three base wheels.
+# heavy_motor    : motor model used for shoulder_lift and elbow_flex in am-arm-6dof.
+# lift_motor     : motor model used for the lift axis.
+_ROBOT_SPECS: dict[str, dict] = {
+    "alohamini1": {
+        "arm_dof": "so-arm-5dof",
+        "standard_motor": "sts3215",
+        "heavy_motor": "sts3215",   # 5dof has no heavy-joint distinction
+        "lift_motor": "sts3215",
+        "lead_mm_per_rev": 84.0,
+    },
+    "alohamini2": {
+        "arm_dof": "am-arm-6dof",
+        "standard_motor": "sts3215",
+        "heavy_motor": "sts3095",
+        "lift_motor": "sts3095",
+        "lead_mm_per_rev": 131.0,
+    },
+    "alohamini2pro": {
+        "arm_dof": "am-arm-6dof",
+        "standard_motor": "sts3250",
+        "heavy_motor": "sts3095",   # heavy joints stay sts3095
+        "lift_motor": "sts3095",
+        "lead_mm_per_rev": 131.0,
+    },
+}
+
+
 class LeKiwi(Robot):
     """
     The robot includes a three omniwheel mobile base and a remote follower arm.
@@ -59,24 +89,34 @@ class LeKiwi(Robot):
         self.config = config
         norm_mode_body = MotorNormMode.DEGREES if config.use_degrees else MotorNormMode.RANGE_M100_100
 
-        if config.arm_profile == "am-arm-6dof":
+        if config.robot_model not in _ROBOT_SPECS:
+            raise ValueError(
+                f"Unknown robot_model '{config.robot_model}'. "
+                f"Expected one of: {list(_ROBOT_SPECS.keys())}."
+            )
+        specs = _ROBOT_SPECS[config.robot_model]
+        sm = specs["standard_motor"]   # e.g. sts3215 or sts3250
+        hm = specs["heavy_motor"]      # e.g. sts3095 (shoulder_lift, elbow_flex in 6dof)
+        lm = specs["lift_motor"]       # e.g. sts3095 or sts3215
+
+        if specs["arm_dof"] == "am-arm-6dof":
             left_arm_motors_cfg = {
-                "arm_left_shoulder_pan": Motor(1, "sts3215", norm_mode_body),
-                "arm_left_shoulder_lift": Motor(2, "sts3095", norm_mode_body),
-                "arm_left_elbow_flex": Motor(3, "sts3095", norm_mode_body),
-                "arm_left_wrist_flex": Motor(4, "sts3215", norm_mode_body),
-                "arm_left_wrist_yaw": Motor(5, "sts3215", norm_mode_body),
-                "arm_left_wrist_roll": Motor(6, "sts3215", norm_mode_body),
-                "arm_left_gripper": Motor(7, "sts3215", MotorNormMode.RANGE_0_100),
+                "arm_left_shoulder_pan": Motor(1, sm, norm_mode_body),
+                "arm_left_shoulder_lift": Motor(2, hm, norm_mode_body),
+                "arm_left_elbow_flex": Motor(3, hm, norm_mode_body),
+                "arm_left_wrist_flex": Motor(4, sm, norm_mode_body),
+                "arm_left_wrist_yaw": Motor(5, sm, norm_mode_body),
+                "arm_left_wrist_roll": Motor(6, sm, norm_mode_body),
+                "arm_left_gripper": Motor(7, sm, MotorNormMode.RANGE_0_100),
             }
             right_arm_motors_cfg = {
-                "arm_right_shoulder_pan": Motor(1, "sts3215", norm_mode_body),
-                "arm_right_shoulder_lift": Motor(2, "sts3095", norm_mode_body),
-                "arm_right_elbow_flex": Motor(3, "sts3095", norm_mode_body),
-                "arm_right_wrist_flex": Motor(4, "sts3215", norm_mode_body),
-                "arm_right_wrist_yaw": Motor(5, "sts3215", norm_mode_body),
-                "arm_right_wrist_roll": Motor(6, "sts3215", norm_mode_body),
-                "arm_right_gripper": Motor(7, "sts3215", MotorNormMode.RANGE_0_100),
+                "arm_right_shoulder_pan": Motor(1, sm, norm_mode_body),
+                "arm_right_shoulder_lift": Motor(2, hm, norm_mode_body),
+                "arm_right_elbow_flex": Motor(3, hm, norm_mode_body),
+                "arm_right_wrist_flex": Motor(4, sm, norm_mode_body),
+                "arm_right_wrist_yaw": Motor(5, sm, norm_mode_body),
+                "arm_right_wrist_roll": Motor(6, sm, norm_mode_body),
+                "arm_right_gripper": Motor(7, sm, MotorNormMode.RANGE_0_100),
             }
             self._left_arm_state_keys = (
                 "arm_left_shoulder_pan.pos",
@@ -96,22 +136,22 @@ class LeKiwi(Robot):
                 "arm_right_wrist_roll.pos",
                 "arm_right_gripper.pos",
             )
-        elif config.arm_profile == "so-arm-5dof":
+        else:  # so-arm-5dof
             left_arm_motors_cfg = {
-                "arm_left_shoulder_pan": Motor(1, "sts3215", norm_mode_body),
-                "arm_left_shoulder_lift": Motor(2, "sts3215", norm_mode_body),
-                "arm_left_elbow_flex": Motor(3, "sts3215", norm_mode_body),
-                "arm_left_wrist_flex": Motor(4, "sts3215", norm_mode_body),
-                "arm_left_wrist_roll": Motor(5, "sts3215", norm_mode_body),
-                "arm_left_gripper": Motor(6, "sts3215", MotorNormMode.RANGE_0_100),
+                "arm_left_shoulder_pan": Motor(1, sm, norm_mode_body),
+                "arm_left_shoulder_lift": Motor(2, sm, norm_mode_body),
+                "arm_left_elbow_flex": Motor(3, sm, norm_mode_body),
+                "arm_left_wrist_flex": Motor(4, sm, norm_mode_body),
+                "arm_left_wrist_roll": Motor(5, sm, norm_mode_body),
+                "arm_left_gripper": Motor(6, sm, MotorNormMode.RANGE_0_100),
             }
             right_arm_motors_cfg = {
-                "arm_right_shoulder_pan": Motor(1, "sts3215", norm_mode_body),
-                "arm_right_shoulder_lift": Motor(2, "sts3215", norm_mode_body),
-                "arm_right_elbow_flex": Motor(3, "sts3215", norm_mode_body),
-                "arm_right_wrist_flex": Motor(4, "sts3215", norm_mode_body),
-                "arm_right_wrist_roll": Motor(5, "sts3215", norm_mode_body),
-                "arm_right_gripper": Motor(6, "sts3215", MotorNormMode.RANGE_0_100),
+                "arm_right_shoulder_pan": Motor(1, sm, norm_mode_body),
+                "arm_right_shoulder_lift": Motor(2, sm, norm_mode_body),
+                "arm_right_elbow_flex": Motor(3, sm, norm_mode_body),
+                "arm_right_wrist_flex": Motor(4, sm, norm_mode_body),
+                "arm_right_wrist_roll": Motor(5, sm, norm_mode_body),
+                "arm_right_gripper": Motor(6, sm, MotorNormMode.RANGE_0_100),
             }
             self._left_arm_state_keys = (
                 "arm_left_shoulder_pan.pos",
@@ -129,20 +169,16 @@ class LeKiwi(Robot):
                 "arm_right_wrist_roll.pos",
                 "arm_right_gripper.pos",
             )
-        else:
-            raise ValueError(
-                f"Unknown arm_profile '{config.arm_profile}'. Expected 'so-arm-5dof' or 'am-arm-6dof'."
-            )
 
         self.left_bus = FeetechMotorsBus(
             port=self.config.left_port,
             motors={
                 **left_arm_motors_cfg,
                 # base
-                "base_left_wheel": Motor(8, "sts3215", MotorNormMode.RANGE_M100_100),
-                "base_back_wheel": Motor(9, "sts3215", MotorNormMode.RANGE_M100_100),
-                "base_right_wheel": Motor(10, "sts3215", MotorNormMode.RANGE_M100_100),
-                "lift_axis": Motor(11, "sts3215", MotorNormMode.DEGREES),
+                "base_left_wheel": Motor(8, sm, MotorNormMode.RANGE_M100_100),
+                "base_back_wheel": Motor(9, sm, MotorNormMode.RANGE_M100_100),
+                "base_right_wheel": Motor(10, sm, MotorNormMode.RANGE_M100_100),
+                "lift_axis": Motor(11, lm, MotorNormMode.DEGREES),
             },
             calibration=self.calibration,
         )
@@ -169,9 +205,8 @@ class LeKiwi(Robot):
         self.cameras = make_cameras_from_configs(config.cameras)
 
 
-        _lead_mm_per_rev = {"alohamini1": 84.0, "alohamini2": 131.0}.get(config.robot_model, 84.0)
         self.lift = LiftAxis(
-            LiftAxisConfig(lead_mm_per_rev=_lead_mm_per_rev),
+            LiftAxisConfig(lead_mm_per_rev=specs["lead_mm_per_rev"], motor_model=lm),
             bus_left=self.left_bus,
             bus_right=self.right_bus,
         )

@@ -46,8 +46,11 @@ class LeKiwiConfig(RobotConfig):
     left_port: str = "/dev/am_arm_follower_left"  # port to connect to the bus
     right_port: str = "/dev/am_arm_follower_right"  # port to connect to the bus
     disable_torque_on_disconnect: bool = True
-    arm_profile: str = "so-arm-5dof"  # "am-arm-6dof" or "so-arm-5dof"
-    robot_model: str = "alohamini1"   # "alohamini1" (lead=84 mm/rev) or "alohamini2" (lead=120 mm/rev)
+    # robot_model drives all hardware specs: arm DOF, motor models, lift motor, lead screw pitch.
+    # alohamini1   – so-arm-5dof,  all sts3215,                  lift sts3215, lead=84 mm/rev
+    # alohamini2   – am-arm-6dof,  sts3215/sts3095 (heavy joints), lift sts3095, lead=131 mm/rev
+    # alohamini2pro– am-arm-6dof,  sts3250/sts3095 (heavy joints), lift sts3095, lead=131 mm/rev
+    robot_model: str = "alohamini1"
 
     # `max_relative_target` limits the magnitude of the relative positional target vector for safety purposes.
     # Set this to a positive scalar to have the same value for all motors, or a list that is the same length as

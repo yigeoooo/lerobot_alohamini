@@ -12,6 +12,23 @@ For newly added debugging commands, please refer to:
 AlohaMini Hardware 
 ![alohamini concept](examples/alohamini/media/alohamini3a.png)  
 
+## System Architecture
+
+AlohaMini runs as a **two-machine setup**:
+
+```
+┌─────────────────────────────┐        LAN        ┌──────────────────────────────────┐
+│          PC (Client)        │ ◄───────────────► │     Raspberry Pi (Host)          │
+│                             │                   │                                  │
+│  • Leader arms (USB)        │                   │  • Follower arms (USB)           │
+│  • teleoperate_bi.py        │                   │  • Base wheels + lift axis (USB) │
+│  • record_bi.py             │                   │  • Cameras (USB)                 │
+│  • Training / Evaluation    │                   │  • lekiwi_host.py                │
+└─────────────────────────────┘                   └──────────────────────────────────┘
+```
+
+Both machines must be on the same LAN. Install the full environment on both.
+
 
 ## Getting Started (Ubuntu System)
 
@@ -42,8 +59,8 @@ git clone https://github.com/liyiteng/lerobot_alohamini.git
 
 ### 3. Serial Port Authorization
 By default, serial ports cannot be accessed. We need to authorize the ports. The lerobot official documentation example modifies serial port permissions to 666, but in practice, this needs to be reset after each computer restart, which is very troublesome. It's recommended to directly add the current user to the device user group for a permanent solution.
-1. Enter `whoami` in terminal  // Check current username
-2. Enter `sudo usermod -a -G dialout username` // Permanently add username to device user group
+1. Enter `whoami` in terminal  — check current username
+2. Enter `sudo usermod -a -G dialout username`  — permanently add username to device user group
 3. Restart computer to make permissions effective
 
 ### 4. Install conda3 and Environment Dependencies
@@ -110,9 +127,21 @@ You can directly enter commands in terminal and confirm the inserted port number
 ls /dev/ttyACM*
 ```
 
-**After finding the correct ports, please modify the corresponding port numbers in the following files:
-Follower arms: lerobot/robots/alohamini/config_lekiwi.py
-Leader arms: examples/alohamini/teleoperate_bi.py**
+**After finding the correct ports, update the port fields in the following files:**
+
+Follower arms — edit `src/lerobot/robots/alohamini/config_lekiwi.py`:
+```python
+@dataclass
+class LeKiwiConfig(RobotConfig):
+    left_port:  str = "/dev/ttyACM0"   # ← replace with your left-bus port
+    right_port: str = "/dev/ttyACM1"   # ← replace with your right-bus port
+```
+
+Leader arms — edit `examples/alohamini/teleoperate_bi.py`:
+```python
+left_arm_config  = SOLeaderConfig(port="/dev/ttyACM2", ...)   # ← replace
+right_arm_config = SOLeaderConfig(port="/dev/ttyACM3", ...)   # ← replace
+```
 
 Note: This operation must be performed every time you reconnect the robot arms or restart the computer
 
@@ -135,73 +164,85 @@ Note:
 Host-side calibration:
 SSH into the Raspberry Pi, install the conda environment, then perform the following operations:
 
-##### SO‑ARM (5‑DoF)
+> `--robot_model` is the single parameter that drives everything on the host side — arm DOF, all motor models, lift motor, and lead-screw pitch. Choose the one that matches your hardware:
+>
+> | `--robot_model`  | Arm           | Arm motors          | Base wheels | Lift motor | Lead screw  |
+> |------------------|---------------|---------------------|-------------|------------|-------------|
+> | `alohamini1`     | SO-ARM 5-DoF  | all sts3215         | sts3215 ×3  | sts3215    | 84 mm/rev   |
+> | `alohamini2`     | AM-ARM 6-DoF  | sts3215 + sts3095   | sts3215 ×3  | sts3095    | 131 mm/rev  |
+> | `alohamini2pro`  | AM-ARM 6-DoF  | sts3250 + sts3095   | sts3250 ×3  | sts3095    | 131 mm/rev  |
+
+##### AlohaMini 1 (SO‑ARM 5‑DoF)
 
 ``` bash
 python -m lerobot.robots.alohamini.lekiwi_host \
-  --arm_profile so-arm-5dof \
   --robot_model alohamini1
 ```
 
-##### AM‑ARM (6‑DoF)
+##### AlohaMini 2 (AM‑ARM 6‑DoF)
 
 ``` bash
 python -m lerobot.robots.alohamini.lekiwi_host \
-  --arm_profile am-arm-6dof \
   --robot_model alohamini2
 ```
 
-> `--robot_model` selects the lift-axis leadscrew pitch: `alohamini1` = 84 mm/rev, `alohamini2` = 131 mm/rev. Defaults to `alohamini1` if omitted.
+##### AlohaMini 2 Pro (AM‑ARM 6‑DoF, sts3250 upgrade)
 
-If executing for the first time, the system will prompt us to calibrate the robot arm. Position the robot arm as shown in the image, press Enter, then rotate each joint 90 degrees left, then 90 degrees right, then press Enter
-![Calibration](examples/alohamini/media/mid_position_so100.png)  
-
-
-Client-side calibration:
-Execute the following command, replace the IP with the actual IP of the host Raspberry Pi, then repeat the above steps
-
-SO-ARM (5-DoF):
+``` bash
+python -m lerobot.robots.alohamini.lekiwi_host \
+  --robot_model alohamini2pro
 ```
+
+If executing for the first time, the system will prompt you to calibrate the robot arm. Follow the on-screen instructions: position the arm to its middle pose, press Enter, rotate each joint 90° left, press Enter, rotate 90° right, press Enter.
+
+**SO-ARM 5-DoF** — reference middle position:
+![Calibration SO-ARM](examples/alohamini/media/mid_position_so100.png)
+
+**AM-ARM 6-DoF** — same procedure applies; position each joint at its mechanical midpoint before starting.
+
+
+Client-side calibration (calibrates the **leader arms** on the PC):
+Replace the IP with the actual IP of your Raspberry Pi, then repeat the calibration steps above for each leader arm.
+
+> `--arm_profile` here refers to your **leader arm** hardware (not the follower robot).  
+> Use `so-arm-5dof` if your leader arms are SO-ARM 5-DoF; use `am-arm-6dof` if they are AM-ARM 6-DoF.
+
+SO-ARM leader (5-DoF):
+```bash
 python examples/alohamini/teleoperate_bi.py \
---remote_ip 192.168.50.43 \
---leader_id so101_leader_bi \
---arm_profile so-arm-5dof
+  --remote_ip <Pi_IP> \
+  --leader_id so101_leader_bi \
+  --arm_profile so-arm-5dof
 ```
 
-AM-ARM (6-DoF):
-```
+AM-ARM leader (6-DoF):
+```bash
 python examples/alohamini/teleoperate_bi.py \
---remote_ip 192.168.50.43 \
---leader_id so101_leader_bi \
---arm_profile am-arm-6dof
-
+  --remote_ip <Pi_IP> \
+  --leader_id so101_leader_bi \
+  --arm_profile am-arm-6dof
 ```
 
 Note: After calibration, you need to power off the robotic arm once for the changes to take effect, for both the leader arms and the follower arms.
 
 #### 7.2 Teleoperation Command Summary
 
-Raspberry Pi side:
-
-##### SO‑ARM (5‑DoF)
+Raspberry Pi side (pick the command that matches your robot):
 
 ``` bash
-python -m lerobot.robots.alohamini.lekiwi_host \
-  --arm_profile so-arm-5dof \
-  --robot_model alohamini1
+# AlohaMini 1 (SO-ARM 5-DoF)
+python -m lerobot.robots.alohamini.lekiwi_host --robot_model alohamini1
+
+# AlohaMini 2 (AM-ARM 6-DoF)
+python -m lerobot.robots.alohamini.lekiwi_host --robot_model alohamini2
+
+# AlohaMini 2 Pro (AM-ARM 6-DoF, sts3250 upgrade)
+python -m lerobot.robots.alohamini.lekiwi_host --robot_model alohamini2pro
 ```
 
-##### AM‑ARM (6‑DoF)
+PC side (`--arm_profile` here refers to the **leader arm** hardware, not the follower robot):
 
-``` bash
-python -m lerobot.robots.alohamini.lekiwi_host \
-  --arm_profile am-arm-6dof \
-  --robot_model alohamini2
-```
-
-PC side:
-
-##### SO‑ARM (5‑DoF)
+##### SO‑ARM leader (5‑DoF)
 
 ``` 
 python examples/alohamini/teleoperate_bi.py \
@@ -210,7 +251,7 @@ python examples/alohamini/teleoperate_bi.py \
   --arm_profile so-arm-5dof
 ```
 
-##### AM‑ARM (6‑DoF)
+##### AM‑ARM leader (6‑DoF)
 
 ``` 
 python examples/alohamini/teleoperate_bi.py \
@@ -244,11 +285,14 @@ echo $HF_USER
 
 ```
 
-##### SO-ARM (5-DoF):
+> **Before recording**, make sure the Raspberry Pi host is already running with the correct `--robot_model` (see §7.2).  
+> The `--arm_profile` below refers to your **leader arm** hardware, not the follower robot.  
+> Replace `<Pi_IP>` with your Raspberry Pi's IP address (use `127.0.0.1` only if the Pi and PC are the same machine).
 
-//Create New Dataset
+##### AlohaMini 1 — SO-ARM leader (5-DoF):
 
-```
+Create New Dataset:
+```bash
 python examples/alohamini/record_bi.py \
   --dataset $HF_USER/so100_bi_test \
   --num_episodes 1 \
@@ -256,14 +300,13 @@ python examples/alohamini/record_bi.py \
   --episode_time 45 \
   --reset_time 8 \
   --task_description "pickup1" \
-  --remote_ip 127.0.0.1 \
+  --remote_ip <Pi_IP> \
   --leader_id so101_leader_bi \
   --arm_profile so-arm-5dof
-
 ```
 
-//Resume Dataset
-```
+Resume Dataset:
+```bash
 python examples/alohamini/record_bi.py \
   --dataset $HF_USER/so100_bi_test \
   --num_episodes 1 \
@@ -271,18 +314,16 @@ python examples/alohamini/record_bi.py \
   --episode_time 45 \
   --reset_time 8 \
   --task_description "pickup1" \
-  --remote_ip 127.0.0.1 \
+  --remote_ip <Pi_IP> \
   --leader_id so101_leader_bi \
   --arm_profile so-arm-5dof \
-  --resume 
-
+  --resume
 ```
 
-##### AM-ARM (6-DoF):
+##### AlohaMini 2 / 2 Pro — AM-ARM leader (6-DoF):
 
-//Create New Dataset
-
-```
+Create New Dataset:
+```bash
 python examples/alohamini/record_bi.py \
   --dataset $HF_USER/so100_bi_test \
   --num_episodes 1 \
@@ -290,14 +331,13 @@ python examples/alohamini/record_bi.py \
   --episode_time 45 \
   --reset_time 8 \
   --task_description "pickup1" \
-  --remote_ip 127.0.0.1 \
+  --remote_ip <Pi_IP> \
   --leader_id so101_leader_bi \
   --arm_profile am-arm-6dof
-
 ```
 
-//Resume Dataset
-```
+Resume Dataset:
+```bash
 python examples/alohamini/record_bi.py \
   --dataset $HF_USER/so100_bi_test \
   --num_episodes 1 \
@@ -305,20 +345,19 @@ python examples/alohamini/record_bi.py \
   --episode_time 45 \
   --reset_time 8 \
   --task_description "pickup1" \
-  --remote_ip 127.0.0.1 \
+  --remote_ip <Pi_IP> \
   --leader_id so101_leader_bi \
   --arm_profile am-arm-6dof \
   --resume
-
 ```
 
 
 ### 9. Replay Dataset
-```
-python examples/alohamini/replay_bi.py  \
---dataset $HF_USER/so100_bi_test \
---episode 0 \
---remote_ip 127.0.0.1
+```bash
+python examples/alohamini/replay_bi.py \
+  --dataset $HF_USER/so100_bi_test \
+  --episode 0 \
+  --remote_ip <Pi_IP>
 ```
 
 ### 10. Dataset Visualization
@@ -331,9 +370,9 @@ python examples/alohamini/replay_bi.py  \
 ```
 
 ### 11. Local Training
-// ACT
 
-```
+ACT policy:
+```bash
 lerobot-train \
   --dataset.repo_id=$HF_USER/so100_bi_test \
   --policy.type=act \
@@ -341,36 +380,48 @@ lerobot-train \
   --job_name=act_your_dataset \
   --policy.device=cuda \
   --wandb.enable=false \
-  --policy.repo_id=liyitenga/act_policy
+  --policy.repo_id=$HF_USER/act_policy
 ```
 
 
 ### 12. Remote Training
 Using AutoDL as an example:
-Apply for an RTX 4070 GPU, select Python 3.8 (Ubuntu 20.04) CUDA 11.8 or above as container image, and log in via terminal
-```
-// Enter remote terminal, initialize conda
+Apply for an RTX 4070 GPU, select Python 3.12 (Ubuntu 22.04) CUDA 11.8 or above as container image, and log in via terminal
+
+```bash
+# Initialize conda (first login only)
 conda init
+# Restart terminal, then create environment
+conda create -y -n lerobot_alohamini python=3.12
+conda activate lerobot_alohamini
 
-// Restart terminal, create environment
-conda create -y -n lerobot python=3.10
-conda activate lerobot
-
-// Academic acceleration
+# Academic acceleration (AutoDL-specific)
 source /etc/network_turbo
 
-// Get lerobot
+# Get lerobot
 git clone https://github.com/liyiteng/lerobot_alohamini.git
 
-// Install necessary files
+# Install dependencies
 cd ~/lerobot_alohamini
-pip install -e ".[feetech]"
+pip install -e ".[all]"
+conda install ffmpeg=7.1.1 -c conda-forge
 ```
 
-Run training command
+Run training (same command as local training, GPU is used by default):
 
-Finally install FileZilla to retrieve the trained files
+```bash
+lerobot-train \
+  --dataset.repo_id=$HF_USER/so100_bi_test \
+  --policy.type=act \
+  --output_dir=outputs/train/act_your_dataset1 \
+  --job_name=act_your_dataset \
+  --policy.device=cuda \
+  --wandb.enable=false \
+  --policy.repo_id=$HF_USER/act_policy
 ```
+
+Finally install FileZilla to retrieve the trained files:
+```bash
 sudo apt install filezilla -y
 ```
 
@@ -378,16 +429,14 @@ sudo apt install filezilla -y
 
 Use FileZilla to copy the trained model to local machine, then run the following command:
 
-```
+```bash
 python examples/alohamini/evaluate_bi.py \
   --num_episodes 3 \
   --fps 20 \
   --episode_time 45 \
   --task_description "Pick and place task" \
-  --hf_model_id liyitenga/act_policy \
-  --hf_dataset_id liyitenga/eval_dataset \
-  --remote_ip 127.0.0.1 \
-  --robot_id my_alohamini \
-  --hf_model_id ./outputs/train/act_your_dataset1/checkpoints/020000/pretrained_model
-  
+  --hf_model_id ./outputs/train/act_your_dataset1/checkpoints/020000/pretrained_model \
+  --hf_dataset_id $HF_USER/eval_dataset \
+  --remote_ip <Pi_IP> \
+  --robot_id my_alohamini
 ```
