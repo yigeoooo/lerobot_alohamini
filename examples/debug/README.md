@@ -21,14 +21,14 @@ python examples/debug/axis.py \
 python examples/debug/motors.py move_motor_to_position \
   --id 1 \
   --position 2 \
-  --port /dev/ttyACM1
+  --port /dev/ttyACM0
 ```
 
 
 #### Set a new motor ID
 ```
 python examples/debug/motors.py configure_motor_id \
-  --id 10 \
+  --id 1 \
   --set_id 8 \
   --port /dev/ttyACM0
 ```
