@@ -46,10 +46,11 @@ class LeKiwiConfig(RobotConfig):
     left_port: str = "/dev/am_arm_follower_left"  # port to connect to the bus
     right_port: str = "/dev/am_arm_follower_right"  # port to connect to the bus
     disable_torque_on_disconnect: bool = True
-    # robot_model drives all hardware specs: arm DOF, motor models, lift motor, lead screw pitch.
-    # alohamini1   – so-arm-5dof,  all sts3215,                  lift sts3215, lead=84 mm/rev
-    # alohamini2   – am-arm-6dof,  sts3215/sts3095 (heavy joints), lift sts3095, lead=131 mm/rev
-    # alohamini2pro– am-arm-6dof,  sts3250/sts3095 (heavy joints), lift sts3095, lead=131 mm/rev
+    # robot_model drives the whole-robot hardware specs: follower arm profile, base motors,
+    # lift motor, and lead screw pitch.
+    # alohamini1   – so-arm-5dof,          base sts3215, lift sts3215, lead=84 mm/rev
+    # alohamini2   – am-follower-6dof,     base sts3215, lift sts3095, lead=131 mm/rev
+    # alohamini2pro– am-follower-6dof-hd,  base sts3250, lift sts3095, lead=131 mm/rev
     robot_model: str = "alohamini1"
 
     # `max_relative_target` limits the magnitude of the relative positional target vector for safety purposes.
@@ -97,8 +98,8 @@ class LeKiwiClientConfig(RobotConfig):
 
     # Must match the robot_model used on the host side so that _state_ft keys are consistent.
     # alohamini1   – so-arm-5dof (6 joints per arm, no wrist_yaw)
-    # alohamini2   – am-arm-6dof (7 joints per arm, includes wrist_yaw)
-    # alohamini2pro– am-arm-6dof (7 joints per arm, includes wrist_yaw)
+    # alohamini2   – am-follower-6dof (7 joints per arm, includes wrist_yaw)
+    # alohamini2pro– am-follower-6dof-hd (7 joints per arm, includes wrist_yaw)
     robot_model: str = "alohamini1"
 
     teleop_keys: dict[str, str] = field(

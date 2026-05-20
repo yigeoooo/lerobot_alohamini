@@ -43,30 +43,88 @@ logger = logging.getLogger(__name__)
 from .lift_axis import LiftAxis, LiftAxisConfig
 
 
-# Per-model hardware specifications.
-# standard_motor : motor model used for all arm joints except heavy-load joints in 6dof,
-#                  and for all three base wheels.
-# heavy_motor    : motor model used for shoulder_lift and elbow_flex in am-arm-6dof.
-# lift_motor     : motor model used for the lift axis.
+# Per-arm hardware profiles. Keep the profile name about the arm itself:
+# role, DOF, and motor class. Whole-robot SKUs are mapped separately below.
+_ARM_PROFILES: dict[str, tuple[tuple[str, int, str, MotorNormMode | None], ...]] = {
+    "so-arm-5dof": (
+        ("shoulder_pan", 1, "sts3215", None),
+        ("shoulder_lift", 2, "sts3215", None),
+        ("elbow_flex", 3, "sts3215", None),
+        ("wrist_flex", 4, "sts3215", None),
+        ("wrist_roll", 5, "sts3215", None),
+        ("gripper", 6, "sts3215", MotorNormMode.RANGE_0_100),
+    ),
+    "am-leader-6dof": (
+        ("shoulder_pan", 1, "sts3215", None),
+        ("shoulder_lift", 2, "sts3215", None),
+        ("elbow_flex", 3, "sts3215", None),
+        ("wrist_flex", 4, "sts3215", None),
+        ("wrist_yaw", 5, "sts3215", None),
+        ("wrist_roll", 6, "sts3215", None),
+        ("gripper", 7, "sts3215", MotorNormMode.RANGE_0_100),
+    ),
+    "am-follower-6dof": (
+        ("shoulder_pan", 1, "sts3215", None),
+        ("shoulder_lift", 2, "sts3095", None),
+        ("elbow_flex", 3, "sts3095", None),
+        ("wrist_flex", 4, "sts3215", None),
+        ("wrist_yaw", 5, "sts3215", None),
+        ("wrist_roll", 6, "sts3215", None),
+        ("gripper", 7, "sts3215", MotorNormMode.RANGE_0_100),
+    ),
+    "am-follower-6dof-hd": (
+        ("shoulder_pan", 1, "sts3250", None),
+        ("shoulder_lift", 2, "sts3095", None),
+        ("elbow_flex", 3, "sts3095", None),
+        ("wrist_flex", 4, "sts3250", None),
+        ("wrist_yaw", 5, "sts3250", None),
+        ("wrist_roll", 6, "sts3250", None),
+        ("gripper", 7, "sts3250", MotorNormMode.RANGE_0_100),
+    ),
+}
+
+
+def _make_arm_motors(
+    prefix: str, arm_profile: str, norm_mode_body: MotorNormMode
+) -> dict[str, Motor]:
+    if arm_profile not in _ARM_PROFILES:
+        raise ValueError(
+            f"Unknown arm_profile '{arm_profile}'. Expected one of: {list(_ARM_PROFILES.keys())}."
+        )
+
+    return {
+        f"{prefix}_{joint}": Motor(motor_id, model, norm_mode or norm_mode_body)
+        for joint, motor_id, model, norm_mode in _ARM_PROFILES[arm_profile]
+    }
+
+
+def _arm_state_keys(prefix: str, arm_profile: str) -> tuple[str, ...]:
+    if arm_profile not in _ARM_PROFILES:
+        raise ValueError(
+            f"Unknown arm_profile '{arm_profile}'. Expected one of: {list(_ARM_PROFILES.keys())}."
+        )
+
+    return tuple(f"{prefix}_{joint}.pos" for joint, _, _, _ in _ARM_PROFILES[arm_profile])
+
+
+# Per-model hardware specifications. `robot_model` is the customer-facing whole-robot SKU;
+# `arm_profile` selects the follower arm hardware mounted on that robot.
 _ROBOT_SPECS: dict[str, dict] = {
     "alohamini1": {
-        "arm_dof": "so-arm-5dof",
-        "standard_motor": "sts3215",
-        "heavy_motor": "sts3215",   # 5dof has no heavy-joint distinction
+        "arm_profile": "so-arm-5dof",
+        "base_motor": "sts3215",
         "lift_motor": "sts3215",
         "lead_mm_per_rev": 84.0,
     },
     "alohamini2": {
-        "arm_dof": "am-arm-6dof",
-        "standard_motor": "sts3215",
-        "heavy_motor": "sts3095",
+        "arm_profile": "am-follower-6dof",
+        "base_motor": "sts3215",
         "lift_motor": "sts3095",
         "lead_mm_per_rev": 131.0,
     },
     "alohamini2pro": {
-        "arm_dof": "am-arm-6dof",
-        "standard_motor": "sts3250",
-        "heavy_motor": "sts3095",   # heavy joints stay sts3095
+        "arm_profile": "am-follower-6dof-hd",
+        "base_motor": "sts3250",
         "lift_motor": "sts3095",
         "lead_mm_per_rev": 131.0,
     },
@@ -95,89 +153,23 @@ class LeKiwi(Robot):
                 f"Expected one of: {list(_ROBOT_SPECS.keys())}."
             )
         specs = _ROBOT_SPECS[config.robot_model]
-        sm = specs["standard_motor"]   # e.g. sts3215 or sts3250
-        hm = specs["heavy_motor"]      # e.g. sts3095 (shoulder_lift, elbow_flex in 6dof)
-        lm = specs["lift_motor"]       # e.g. sts3095 or sts3215
+        arm_profile = specs["arm_profile"]
+        bm = specs["base_motor"]
+        lm = specs["lift_motor"]
 
-        if specs["arm_dof"] == "am-arm-6dof":
-            left_arm_motors_cfg = {
-                "arm_left_shoulder_pan": Motor(1, sm, norm_mode_body),
-                "arm_left_shoulder_lift": Motor(2, hm, norm_mode_body),
-                "arm_left_elbow_flex": Motor(3, hm, norm_mode_body),
-                "arm_left_wrist_flex": Motor(4, sm, norm_mode_body),
-                "arm_left_wrist_yaw": Motor(5, sm, norm_mode_body),
-                "arm_left_wrist_roll": Motor(6, sm, norm_mode_body),
-                "arm_left_gripper": Motor(7, sm, MotorNormMode.RANGE_0_100),
-            }
-            right_arm_motors_cfg = {
-                "arm_right_shoulder_pan": Motor(1, sm, norm_mode_body),
-                "arm_right_shoulder_lift": Motor(2, hm, norm_mode_body),
-                "arm_right_elbow_flex": Motor(3, hm, norm_mode_body),
-                "arm_right_wrist_flex": Motor(4, sm, norm_mode_body),
-                "arm_right_wrist_yaw": Motor(5, sm, norm_mode_body),
-                "arm_right_wrist_roll": Motor(6, sm, norm_mode_body),
-                "arm_right_gripper": Motor(7, sm, MotorNormMode.RANGE_0_100),
-            }
-            self._left_arm_state_keys = (
-                "arm_left_shoulder_pan.pos",
-                "arm_left_shoulder_lift.pos",
-                "arm_left_elbow_flex.pos",
-                "arm_left_wrist_flex.pos",
-                "arm_left_wrist_yaw.pos",
-                "arm_left_wrist_roll.pos",
-                "arm_left_gripper.pos",
-            )
-            self._right_arm_state_keys = (
-                "arm_right_shoulder_pan.pos",
-                "arm_right_shoulder_lift.pos",
-                "arm_right_elbow_flex.pos",
-                "arm_right_wrist_flex.pos",
-                "arm_right_wrist_yaw.pos",
-                "arm_right_wrist_roll.pos",
-                "arm_right_gripper.pos",
-            )
-        else:  # so-arm-5dof
-            left_arm_motors_cfg = {
-                "arm_left_shoulder_pan": Motor(1, sm, norm_mode_body),
-                "arm_left_shoulder_lift": Motor(2, sm, norm_mode_body),
-                "arm_left_elbow_flex": Motor(3, sm, norm_mode_body),
-                "arm_left_wrist_flex": Motor(4, sm, norm_mode_body),
-                "arm_left_wrist_roll": Motor(5, sm, norm_mode_body),
-                "arm_left_gripper": Motor(6, sm, MotorNormMode.RANGE_0_100),
-            }
-            right_arm_motors_cfg = {
-                "arm_right_shoulder_pan": Motor(1, sm, norm_mode_body),
-                "arm_right_shoulder_lift": Motor(2, sm, norm_mode_body),
-                "arm_right_elbow_flex": Motor(3, sm, norm_mode_body),
-                "arm_right_wrist_flex": Motor(4, sm, norm_mode_body),
-                "arm_right_wrist_roll": Motor(5, sm, norm_mode_body),
-                "arm_right_gripper": Motor(6, sm, MotorNormMode.RANGE_0_100),
-            }
-            self._left_arm_state_keys = (
-                "arm_left_shoulder_pan.pos",
-                "arm_left_shoulder_lift.pos",
-                "arm_left_elbow_flex.pos",
-                "arm_left_wrist_flex.pos",
-                "arm_left_wrist_roll.pos",
-                "arm_left_gripper.pos",
-            )
-            self._right_arm_state_keys = (
-                "arm_right_shoulder_pan.pos",
-                "arm_right_shoulder_lift.pos",
-                "arm_right_elbow_flex.pos",
-                "arm_right_wrist_flex.pos",
-                "arm_right_wrist_roll.pos",
-                "arm_right_gripper.pos",
-            )
+        left_arm_motors_cfg = _make_arm_motors("arm_left", arm_profile, norm_mode_body)
+        right_arm_motors_cfg = _make_arm_motors("arm_right", arm_profile, norm_mode_body)
+        self._left_arm_state_keys = _arm_state_keys("arm_left", arm_profile)
+        self._right_arm_state_keys = _arm_state_keys("arm_right", arm_profile)
 
         self.left_bus = FeetechMotorsBus(
             port=self.config.left_port,
             motors={
                 **(left_arm_motors_cfg if not config.no_follower else {}),
                 # base
-                "base_left_wheel": Motor(8, sm, MotorNormMode.RANGE_M100_100),
-                "base_back_wheel": Motor(9, sm, MotorNormMode.RANGE_M100_100),
-                "base_right_wheel": Motor(10, sm, MotorNormMode.RANGE_M100_100),
+                "base_left_wheel": Motor(8, bm, MotorNormMode.RANGE_M100_100),
+                "base_back_wheel": Motor(9, bm, MotorNormMode.RANGE_M100_100),
+                "base_right_wheel": Motor(10, bm, MotorNormMode.RANGE_M100_100),
                 "lift_axis": Motor(11, lm, MotorNormMode.DEGREES),
             },
             calibration=self.calibration,
@@ -655,8 +647,8 @@ class LeKiwi(Robot):
             np.ndarray: the action sent to the motors, potentially clipped.
         """
         # arm_goal_pos = {k: v for k, v in action.items() if k.endswith(".pos")}
-        left_pos  = {k: v for k, v in action.items() if k.endswith(".pos") and k.startswith("arm_left_")}
-        right_pos = {k: v for k, v in action.items() if k.endswith(".pos") and k.startswith("arm_right_")}
+        left_pos  = {k: v for k, v in action.items() if k.endswith(".pos") and k.startswith("arm_left_") and k.replace(".pos", "") in self.left_bus.motors}
+        right_pos = {k: v for k, v in action.items() if k.endswith(".pos") and k.startswith("arm_right_") and self.right_bus is not None and k.replace(".pos", "") in self.right_bus.motors}
 
 
         base_goal_vel = {k: v for k, v in action.items() if k.endswith(".vel")}

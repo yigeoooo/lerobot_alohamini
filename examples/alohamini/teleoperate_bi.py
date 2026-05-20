@@ -21,8 +21,8 @@ parser.add_argument(
     "--arm_profile",
     type=str,
     default="so-arm-5dof",
-    choices=["so-arm-5dof", "am-arm-6dof"],
-    help="Arm profile selector used for both leader and follower consistency.",
+    choices=["so-arm-5dof", "am-leader-6dof"],
+    help="Leader arm profile selector.",
 )
 
 args = parser.parse_args()
@@ -41,11 +41,11 @@ if NO_LEADER:
 robot_config = LeKiwiClientConfig(remote_ip=args.remote_ip, id="my_alohamini")
 bi_cfg = BiSOLeaderConfig(
     left_arm_config=SOLeaderConfig(
-        port="/dev/am_arm_leader_left",
+        port="/dev/ttyACM0",
         arm_profile=args.arm_profile,
     ),
     right_arm_config=SOLeaderConfig(
-        port="/dev/am_arm_leader_right",
+        port="/dev/ttyACM1",
         arm_profile=args.arm_profile,
     ),
     id=args.leader_id,

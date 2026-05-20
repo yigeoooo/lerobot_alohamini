@@ -2,6 +2,7 @@
 
 from email import parser
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
+from lerobot.utils.constants import HF_LEROBOT_HOME
 from lerobot.datasets.feature_utils import hw_to_dataset_features
 from lerobot.processor import make_default_processors
 from lerobot.robots.alohamini.config_lekiwi import LeKiwiClientConfig
@@ -17,7 +18,6 @@ from lerobot.utils.visualization_utils import init_rerun
 
 from datetime import datetime
 import argparse
-from pathlib import Path
 
 def main():
     parser = argparse.ArgumentParser(description="Record episodes with bi-arm teleoperation")
@@ -35,8 +35,8 @@ def main():
         "--arm_profile",
         type=str,
         default="so-arm-5dof",
-        choices=["so-arm-5dof", "am-arm-6dof"],
-        help="Arm profile selector used for both leader and follower consistency.",
+        choices=["so-arm-5dof", "am-leader-6dof"],
+        help="Leader arm profile selector.",
     )
     parser.add_argument("--resume", action="store_true", help="Resume recording on existing dataset")
 
@@ -46,11 +46,11 @@ def main():
     robot_config = LeKiwiClientConfig(remote_ip=args.remote_ip, id=args.robot_id)
     leader_arm_config = BiSOLeaderConfig(
         left_arm_config=SOLeaderConfig(
-            port="/dev/am_arm_leader_left",
+            port="/dev/ttyACM0",
             arm_profile=args.arm_profile,
         ),
         right_arm_config=SOLeaderConfig(
-            port="/dev/am_arm_leader_right",
+            port="/dev/ttyACM1",
             arm_profile=args.arm_profile,
         ),
         id=args.leader_id,
@@ -68,14 +68,13 @@ def main():
     obs_features = hw_to_dataset_features(robot.observation_features, OBS_STR)
     dataset_features = {**action_features, **obs_features}
 
-    dataset_root = Path(args.dataset.split("/")[-1])
-
     if args.resume:
         print("Resuming existing dataset:", args.dataset)
-        dataset = LeRobotDataset(
-            args.dataset,
+        dataset = LeRobotDataset.resume(
+            repo_id=args.dataset,
+            root=HF_LEROBOT_HOME / args.dataset,
+            image_writer_threads=4,
         )
-        dataset.start_image_writer(num_threads=4)
     else:
         dataset = LeRobotDataset.create(
             repo_id=args.dataset,
