@@ -3,7 +3,6 @@
     <div class="hero glass-panel">
       <div>
         <h2 class="section-title">欢迎回来，{{ authStore.displayName }}</h2>
-        <div class="section-subtitle">登录后基于组织自动加载页面权限，管理员默认可见全部页面。</div>
       </div>
       <el-tag type="primary" size="large">{{ authStore.user?.organizationName }}</el-tag>
     </div>
@@ -13,23 +12,12 @@
         <div class="metric-label">当前组织</div>
         <div class="metric-value">{{ authStore.user?.organizationName || '-' }}</div>
       </article>
-      <article class="metric-card glass-panel">
-        <div class="metric-label">可见页面</div>
-        <div class="metric-value">{{ authStore.routePermissions.length }}</div>
-      </article>
-      <article class="metric-card glass-panel">
-        <div class="metric-label">运行环境</div>
-        <div class="metric-value">{{ appTitle }}</div>
-      </article>
     </div>
 
     <article class="glass-panel list-panel">
-      <h3 class="section-title">当前页面权限</h3>
-      <div class="section-subtitle">以下列表来自数据库路由权限表和组织赋权关系。</div>
+      <h3 class="section-title">您可浏览的页面有：</h3>
       <el-table :data="authStore.routePermissions" style="margin-top: 18px">
         <el-table-column prop="title" label="页面标题" min-width="160" />
-        <el-table-column prop="routePath" label="路由路径" min-width="140" />
-        <el-table-column prop="componentPath" label="组件路径" min-width="220" />
       </el-table>
     </article>
   </section>

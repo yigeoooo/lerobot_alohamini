@@ -8,6 +8,7 @@ import org.springframework.boot.context.properties.ConfigurationPropertiesScan;
 @SpringBootApplication
 @MapperScan(basePackages = {
         "com.lerobot.saas.auth.dao",
+        "com.lerobot.saas.dataset.dao",
         "com.lerobot.saas.organization.dao",
         "com.lerobot.saas.permission.dao",
         "com.lerobot.saas.user.dao",

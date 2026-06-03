@@ -18,6 +18,7 @@ public class SchemaSynchronizer implements ApplicationRunner {
     private static final String ROUTE_ASSIGN_ID = "1910000000000000014";
     private static final String ROUTE_PROFILE_ID = "1910000000000000015";
     private static final String ROUTE_USER_CENTER_ID = "1910000000000000016";
+    private static final String ROUTE_DATASET_ID = "1910000000000000017";
 
     private final JdbcTemplate jdbcTemplate;
     private final PasswordUtils passwordUtils;
@@ -106,6 +107,35 @@ public class SchemaSynchronizer implements ApplicationRunner {
                     UNIQUE KEY uk_org_route_permission (organization_id, route_permission_id)
                 )
                 """);
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS sys_dataset (
+                    id VARCHAR(32) NOT NULL PRIMARY KEY,
+                    dataset_name VARCHAR(150) NOT NULL,
+                    organization_id VARCHAR(32) NOT NULL,
+                    user_id VARCHAR(32) NOT NULL,
+                    original_file_name VARCHAR(255) NOT NULL,
+                    storage_path VARCHAR(500) NOT NULL,
+                    upload_status VARCHAR(32) NOT NULL,
+                    error_message VARCHAR(500) NULL,
+                    codebase_version VARCHAR(50) NULL,
+                    robot_type VARCHAR(100) NULL,
+                    total_episodes INT NULL,
+                    total_frames BIGINT NULL,
+                    total_tasks INT NULL,
+                    fps INT NULL,
+                    data_files_size_mb DECIMAL(10,2) NULL,
+                    video_files_size_mb DECIMAL(10,2) NULL,
+                    feature_count INT NULL,
+                    camera_count INT NULL,
+                    feature_keys TEXT NULL,
+                    camera_keys TEXT NULL,
+                    metadata_json LONGTEXT NULL,
+                    sort INT NOT NULL DEFAULT 0,
+                    deleted TINYINT NOT NULL DEFAULT 0,
+                    created_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                )
+                """);
     }
 
     private void syncColumns() {
@@ -114,6 +144,7 @@ public class SchemaSynchronizer implements ApplicationRunner {
         ensureBaseColumns("sys_user");
         ensureBaseColumns("sys_route_permission");
         ensureBaseColumns("sys_organization_route_permission");
+        ensureBaseColumns("sys_dataset");
 
         ensureColumn("sys_organization", "organization_name", "VARCHAR(100) NOT NULL");
         ensureColumn("sys_organization", "organization_code", "VARCHAR(100) NULL AFTER organization_name");
@@ -141,6 +172,27 @@ public class SchemaSynchronizer implements ApplicationRunner {
 
         ensureColumn("sys_organization_route_permission", "organization_id", "VARCHAR(32) NOT NULL");
         ensureColumn("sys_organization_route_permission", "route_permission_id", "VARCHAR(32) NOT NULL");
+
+        ensureColumn("sys_dataset", "dataset_name", "VARCHAR(150) NOT NULL");
+        ensureColumn("sys_dataset", "organization_id", "VARCHAR(32) NOT NULL AFTER dataset_name");
+        ensureColumn("sys_dataset", "user_id", "VARCHAR(32) NOT NULL AFTER organization_id");
+        ensureColumn("sys_dataset", "original_file_name", "VARCHAR(255) NOT NULL AFTER user_id");
+        ensureColumn("sys_dataset", "storage_path", "VARCHAR(500) NOT NULL AFTER original_file_name");
+        ensureColumn("sys_dataset", "upload_status", "VARCHAR(32) NOT NULL AFTER storage_path");
+        ensureColumn("sys_dataset", "error_message", "VARCHAR(500) NULL AFTER upload_status");
+        ensureColumn("sys_dataset", "codebase_version", "VARCHAR(50) NULL AFTER error_message");
+        ensureColumn("sys_dataset", "robot_type", "VARCHAR(100) NULL AFTER codebase_version");
+        ensureColumn("sys_dataset", "total_episodes", "INT NULL AFTER robot_type");
+        ensureColumn("sys_dataset", "total_frames", "BIGINT NULL AFTER total_episodes");
+        ensureColumn("sys_dataset", "total_tasks", "INT NULL AFTER total_frames");
+        ensureColumn("sys_dataset", "fps", "INT NULL AFTER total_tasks");
+        ensureColumn("sys_dataset", "data_files_size_mb", "DECIMAL(10,2) NULL AFTER fps");
+        ensureColumn("sys_dataset", "video_files_size_mb", "DECIMAL(10,2) NULL AFTER data_files_size_mb");
+        ensureColumn("sys_dataset", "feature_count", "INT NULL AFTER video_files_size_mb");
+        ensureColumn("sys_dataset", "camera_count", "INT NULL AFTER feature_count");
+        ensureColumn("sys_dataset", "feature_keys", "TEXT NULL AFTER camera_count");
+        ensureColumn("sys_dataset", "camera_keys", "TEXT NULL AFTER feature_keys");
+        ensureColumn("sys_dataset", "metadata_json", "LONGTEXT NULL AFTER camera_keys");
     }
 
     private void ensureBaseColumns(String tableName) {
@@ -242,6 +294,7 @@ public class SchemaSynchronizer implements ApplicationRunner {
                 new Object[]{ROUTE_PERMISSION_ID, "route-permissions", "/route-permissions", "views/permission/RoutePermissionView", "页面权限", "Menu", 0, 3},
                 new Object[]{ROUTE_ASSIGN_ID, "permission-assign", "/permission-assign", "views/permission/PermissionAssignView", "组织赋权", "Checked", 0, 4},
                 new Object[]{ROUTE_PROFILE_ID, "profile", "/profile", "views/profile/ProfileView", "个人中心", "User", 0, 5},
+                new Object[]{ROUTE_DATASET_ID, "dataset-upload", "/datasets", "views/dataset/DatasetUploadView", "数据集上传", "UploadFilled", 0, 6},
                 new Object[]{ROUTE_USER_CENTER_ID, "user-management", "/user-management", "views/user/UserManagementView", "用户管理", "UserFilled", 1, 90}
         );
         for (Object[] route : routes) {
@@ -267,7 +320,7 @@ public class SchemaSynchronizer implements ApplicationRunner {
     }
 
     private void initDefaultRelations() {
-        for (String routeId : List.of(ROUTE_HOME_ID, ROUTE_ORG_ID, ROUTE_PERMISSION_ID, ROUTE_ASSIGN_ID, ROUTE_PROFILE_ID, ROUTE_USER_CENTER_ID)) {
+        for (String routeId : List.of(ROUTE_HOME_ID, ROUTE_ORG_ID, ROUTE_PERMISSION_ID, ROUTE_ASSIGN_ID, ROUTE_PROFILE_ID, ROUTE_DATASET_ID, ROUTE_USER_CENTER_ID)) {
             jdbcTemplate.update("""
                     INSERT INTO sys_organization_route_permission (id, organization_id, route_permission_id, sort, deleted, created_time, updated_time)
                     SELECT REPLACE(UUID(), '-', ''), ?, ?, 0, 0, NOW(), NOW()

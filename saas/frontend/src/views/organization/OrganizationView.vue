@@ -4,7 +4,6 @@
       <div class="toolbar-row">
         <div>
           <h2 class="section-title">组织管理</h2>
-          <div class="section-subtitle">支持组织新增、编辑、逻辑删除和模糊查询。</div>
         </div>
         <div class="toolbar-actions">
           <el-input v-model="keyword" placeholder="按名称/编码/说明搜索" clearable @keyup.enter="loadOrganizations" />
@@ -30,7 +29,6 @@
       <div class="toolbar-row">
         <div>
           <h2 class="section-title">组织成员</h2>
-          <div class="section-subtitle">通过组织下拉框查看并维护该组织下的成员。</div>
         </div>
         <div class="toolbar-actions">
           <el-select
@@ -111,7 +109,14 @@
           </el-select>
         </el-form-item>
         <el-form-item label="所属组织">
-          <el-input :model-value="currentOrganization?.organizationName || ''" disabled />
+          <el-select v-model="memberForm.organizationId" filterable>
+            <el-option
+              v-for="organization in organizations"
+              :key="organization.id"
+              :label="organization.organizationName"
+              :value="organization.id"
+            />
+          </el-select>
         </el-form-item>
         <el-form-item label="邮箱">
           <el-input v-model="memberForm.email" />
@@ -184,6 +189,7 @@ const form = reactive({
 const memberForm = reactive({
   name: '',
   gender: 1,
+  organizationId: '',
   email: '',
   rawPassword: '',
   avatarIconId: '',
@@ -235,6 +241,7 @@ function resetMemberForm() {
   editingMemberId.value = ''
   memberForm.name = ''
   memberForm.gender = 1
+  memberForm.organizationId = currentOrganization.value?.id || organizations.value[0]?.id || ''
   memberForm.email = ''
   memberForm.rawPassword = ''
   memberForm.avatarIconId = icons.value[0]?.id || ''
@@ -288,6 +295,7 @@ function openEditMember(row) {
   editingMemberId.value = row.id
   memberForm.name = row.name
   memberForm.gender = row.gender
+  memberForm.organizationId = row.organizationId
   memberForm.email = row.email
   memberForm.rawPassword = ''
   memberForm.avatarIconId = row.avatarIconId
@@ -297,8 +305,7 @@ function openEditMember(row) {
 
 async function submitMember() {
   const payload = {
-    ...memberForm,
-    organizationId: currentOrganization.value.id
+    ...memberForm
   }
 
   if (editingMemberId.value) {
@@ -309,6 +316,10 @@ async function submitMember() {
     ElMessage.success('成员创建成功')
   }
   memberDialogVisible.value = false
+  if (payload.organizationId !== currentOrganization.value?.id) {
+    await loadOrganizations()
+    return
+  }
   await loadMembers()
 }
 
@@ -362,11 +373,11 @@ onMounted(async () => {
 }
 
 .toolbar-actions :deep(.el-input) {
-  width: 260px;
+  width: 240px;
 }
 
 .toolbar-actions :deep(.el-select) {
-  width: 220px;
+  width: 180px;
 }
 
 @media (max-width: 960px) {

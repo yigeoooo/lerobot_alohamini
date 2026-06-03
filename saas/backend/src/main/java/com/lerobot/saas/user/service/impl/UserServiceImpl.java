@@ -6,6 +6,8 @@ import com.lerobot.saas.common.context.UserContext;
 import com.lerobot.saas.common.context.UserContextHolder;
 import com.lerobot.saas.common.exception.BusinessException;
 import com.lerobot.saas.common.util.PasswordUtils;
+import com.lerobot.saas.dataset.dao.DatasetDao;
+import com.lerobot.saas.dataset.entity.SysDataset;
 import com.lerobot.saas.organization.dao.OrganizationDao;
 import com.lerobot.saas.organization.entity.SysOrganization;
 import com.lerobot.saas.user.dao.UserDao;
@@ -29,11 +31,16 @@ public class UserServiceImpl implements UserService {
     private final UserDao userDao;
     private final OrganizationDao organizationDao;
     private final PasswordUtils passwordUtils;
+    private final DatasetDao datasetDao;
 
-    public UserServiceImpl(UserDao userDao, OrganizationDao organizationDao, PasswordUtils passwordUtils) {
+    public UserServiceImpl(UserDao userDao,
+                           OrganizationDao organizationDao,
+                           PasswordUtils passwordUtils,
+                           DatasetDao datasetDao) {
         this.userDao = userDao;
         this.organizationDao = organizationDao;
         this.passwordUtils = passwordUtils;
+        this.datasetDao = datasetDao;
     }
 
     @Override
@@ -119,6 +126,7 @@ public class UserServiceImpl implements UserService {
         }
         requireUser(userId);
         userDao.deleteById(userId);
+        datasetDao.delete(new LambdaQueryWrapper<SysDataset>().eq(SysDataset::getUserId, userId));
     }
 
     @Override

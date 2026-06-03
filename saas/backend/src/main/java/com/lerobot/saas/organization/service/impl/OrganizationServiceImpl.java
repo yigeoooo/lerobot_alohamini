@@ -12,6 +12,8 @@ import com.lerobot.saas.permission.dao.OrganizationRoutePermissionDao;
 import com.lerobot.saas.permission.dao.RoutePermissionDao;
 import com.lerobot.saas.permission.entity.SysOrganizationRoutePermission;
 import com.lerobot.saas.permission.entity.SysRoutePermission;
+import com.lerobot.saas.dataset.dao.DatasetDao;
+import com.lerobot.saas.dataset.entity.SysDataset;
 import com.lerobot.saas.user.dao.UserDao;
 import com.lerobot.saas.user.entity.SysUser;
 import java.util.List;
@@ -26,15 +28,18 @@ public class OrganizationServiceImpl implements OrganizationService {
     private final UserDao userDao;
     private final RoutePermissionDao routePermissionDao;
     private final OrganizationRoutePermissionDao organizationRoutePermissionDao;
+    private final DatasetDao datasetDao;
 
     public OrganizationServiceImpl(OrganizationDao organizationDao,
                                    UserDao userDao,
                                    RoutePermissionDao routePermissionDao,
-                                   OrganizationRoutePermissionDao organizationRoutePermissionDao) {
+                                   OrganizationRoutePermissionDao organizationRoutePermissionDao,
+                                   DatasetDao datasetDao) {
         this.organizationDao = organizationDao;
         this.userDao = userDao;
         this.routePermissionDao = routePermissionDao;
         this.organizationRoutePermissionDao = organizationRoutePermissionDao;
+        this.datasetDao = datasetDao;
     }
 
     @Override
@@ -76,6 +81,7 @@ public class OrganizationServiceImpl implements OrganizationService {
         }
         organizationDao.deleteById(organizationId);
         userDao.delete(new LambdaQueryWrapper<SysUser>().eq(SysUser::getOrganizationId, organizationId));
+        datasetDao.delete(new LambdaQueryWrapper<SysDataset>().eq(SysDataset::getOrganizationId, organizationId));
         organizationRoutePermissionDao.update(null, new LambdaUpdateWrapper<SysOrganizationRoutePermission>()
                 .eq(SysOrganizationRoutePermission::getOrganizationId, organizationId)
                 .set(SysOrganizationRoutePermission::getDeleted, 1));
@@ -100,7 +106,7 @@ public class OrganizationServiceImpl implements OrganizationService {
 
     private void assignBaseRoutes(String organizationId) {
         List<SysRoutePermission> baseRoutes = routePermissionDao.selectList(new LambdaQueryWrapper<SysRoutePermission>()
-                .in(SysRoutePermission::getRoutePath, List.of("/", "/profile")));
+                .in(SysRoutePermission::getRoutePath, List.of("/", "/profile", "/datasets")));
         for (SysRoutePermission baseRoute : baseRoutes) {
             SysOrganizationRoutePermission relation = new SysOrganizationRoutePermission();
             relation.setOrganizationId(organizationId);
