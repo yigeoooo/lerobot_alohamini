@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.lerobot.saas.permission.dao.OrganizationRoutePermissionDao">
+
+    <select id="selectRouteIdsByOrganizationId" resultType="java.lang.String">
+        SELECT route_permission_id
+        FROM sys_organization_route_permission
+        WHERE organization_id = #{organizationId}
+          AND deleted = 0
+        ORDER BY created_time ASC
+    </select>
+
+    <delete id="deleteByOrganizationIdPhysical">
+        DELETE FROM sys_organization_route_permission
+        WHERE organization_id = #{organizationId}
+    </delete>
+
+</mapper>

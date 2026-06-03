@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.lerobot.saas.icon.dao.IconDao">
+
+    <select id="selectAllIcons" resultType="com.lerobot.saas.icon.entity.SysIcon">
+        SELECT
+            id,
+            icon_name,
+            component_name,
+            description,
+            sort,
+            deleted,
+            created_time,
+            updated_time
+        FROM sys_icon
+        WHERE deleted = 0
+        ORDER BY sort ASC, created_time ASC
+    </select>
+
+</mapper>

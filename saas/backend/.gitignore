@@ -1,0 +1,30 @@
+# Maven build output
+/target/
+
+# Logs and runtime files
+*.log
+logs/
+*.pid
+*.seed
+
+# IDE files
+/.idea/
+*.iml
+/.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Local sensitive config
+/src/main/resources/application-dev.yml
+/src/main/resources/application-test.yml
+/src/main/resources/application.yml
+!/src/main/resources/mapper/
+!/src/main/resources/mapper/**/*.xml
+/.env
+/.env.*
+
+# Temporary uploads or local storage
+/storage/
+/tmp/

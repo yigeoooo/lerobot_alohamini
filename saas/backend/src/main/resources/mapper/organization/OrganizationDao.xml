@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.lerobot.saas.organization.dao.OrganizationDao">
+
+    <select id="selectOrganizations" resultType="com.lerobot.saas.organization.entity.SysOrganization">
+        SELECT
+            id,
+            organization_name,
+            organization_code,
+            description,
+            sort,
+            deleted,
+            created_time,
+            updated_time
+        FROM sys_organization
+        WHERE deleted = 0
+        <if test="keyword != null and keyword != ''">
+            AND (
+                organization_name LIKE CONCAT('%', #{keyword}, '%')
+                OR organization_code LIKE CONCAT('%', #{keyword}, '%')
+                OR description LIKE CONCAT('%', #{keyword}, '%')
+            )
+        </if>
+        ORDER BY sort ASC, created_time ASC
+    </select>
+
+</mapper>

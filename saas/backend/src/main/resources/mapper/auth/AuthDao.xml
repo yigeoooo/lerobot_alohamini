@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.lerobot.saas.auth.dao.AuthDao">
+
+    <select id="selectLoginUserByEmail" resultType="com.lerobot.saas.user.entity.SysUser">
+        SELECT
+            u.id,
+            u.name,
+            u.gender,
+            u.organization_id,
+            u.email,
+            u.password_hash,
+            u.raw_password,
+            u.avatar_icon_id,
+            u.system_admin,
+            o.organization_name,
+            i.component_name AS avatar_icon_name
+        FROM sys_user u
+        LEFT JOIN sys_organization o ON o.id = u.organization_id AND o.deleted = 0
+        LEFT JOIN sys_icon i ON i.id = u.avatar_icon_id AND i.deleted = 0
+        WHERE u.email = #{email}
+          AND u.deleted = 0
+        LIMIT 1
+    </select>
+
+    <select id="selectLoginUserById" resultType="com.lerobot.saas.user.entity.SysUser">
+        SELECT
+            u.id,
+            u.name,
+            u.gender,
+            u.organization_id,
+            u.email,
+            u.password_hash,
+            u.raw_password,
+            u.avatar_icon_id,
+            u.system_admin,
+            o.organization_name,
+            i.component_name AS avatar_icon_name
+        FROM sys_user u
+        LEFT JOIN sys_organization o ON o.id = u.organization_id AND o.deleted = 0
+        LEFT JOIN sys_icon i ON i.id = u.avatar_icon_id AND i.deleted = 0
+        WHERE u.id = #{userId}
+          AND u.deleted = 0
+        LIMIT 1
+    </select>
+
+    <select id="selectAllRoutePermissions" resultType="com.lerobot.saas.auth.vo.AuthRoutePermissionVO">
+        SELECT
+            id,
+            route_name,
+            route_path,
+            component_path,
+            title,
+            icon,
+            sort,
+            admin_only
+        FROM sys_route_permission
+        WHERE deleted = 0
+        ORDER BY sort ASC, created_time ASC
+    </select>
+
+    <select id="selectRoutePermissionsByOrganizationId" resultType="com.lerobot.saas.auth.vo.AuthRoutePermissionVO">
+        SELECT
+            rp.id,
+            rp.route_name,
+            rp.route_path,
+            rp.component_path,
+            rp.title,
+            rp.icon,
+            rp.sort,
+            rp.admin_only
+        FROM sys_route_permission rp
+        INNER JOIN sys_organization_route_permission orp
+            ON orp.route_permission_id = rp.id
+           AND orp.deleted = 0
+        WHERE rp.deleted = 0
+          AND rp.admin_only = 0
+          AND orp.organization_id = #{organizationId}
+        ORDER BY rp.sort ASC, rp.created_time ASC
+    </select>
+
+</mapper>

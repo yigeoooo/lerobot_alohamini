@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.lerobot.saas.user.dao.UserDao">
+
+    <select id="selectUserProfileById" resultType="com.lerobot.saas.user.vo.UserProfileVO">
+        SELECT
+            u.id,
+            u.name,
+            u.gender,
+            u.email,
+            u.organization_id,
+            o.organization_name,
+            u.avatar_icon_id,
+            i.component_name AS avatar_icon_name,
+            u.system_admin,
+            u.created_time
+        FROM sys_user u
+        LEFT JOIN sys_organization o ON o.id = u.organization_id AND o.deleted = 0
+        LEFT JOIN sys_icon i ON i.id = u.avatar_icon_id AND i.deleted = 0
+        WHERE u.id = #{userId}
+          AND u.deleted = 0
+        LIMIT 1
+    </select>
+
+    <select id="selectUsers" resultType="com.lerobot.saas.user.vo.UserAdminVO">
+        SELECT
+            u.id,
+            u.name,
+            u.gender,
+            u.organization_id,
+            o.organization_name,
+            u.email,
+            u.avatar_icon_id,
+            i.component_name AS avatar_icon_name,
+            u.system_admin,
+            u.raw_password,
+            u.created_time
+        FROM sys_user u
+        LEFT JOIN sys_organization o ON o.id = u.organization_id AND o.deleted = 0
+        LEFT JOIN sys_icon i ON i.id = u.avatar_icon_id AND i.deleted = 0
+        WHERE u.deleted = 0
+        <if test="keyword != null and keyword != ''">
+            AND (
+                u.name LIKE CONCAT('%', #{keyword}, '%')
+                OR u.email LIKE CONCAT('%', #{keyword}, '%')
+                OR o.organization_name LIKE CONCAT('%', #{keyword}, '%')
+            )
+        </if>
+        <if test="organizationId != null and organizationId != ''">
+            AND u.organization_id = #{organizationId}
+        </if>
+        ORDER BY u.system_admin DESC, u.created_time ASC
+    </select>
+
+</mapper>

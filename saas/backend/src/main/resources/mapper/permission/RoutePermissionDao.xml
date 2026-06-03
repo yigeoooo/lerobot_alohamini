@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.lerobot.saas.permission.dao.RoutePermissionDao">
+
+    <select id="selectAllActiveRoutePermissions" resultType="com.lerobot.saas.permission.entity.SysRoutePermission">
+        SELECT
+            id,
+            route_name,
+            route_path,
+            component_path,
+            title,
+            icon,
+            admin_only,
+            sort,
+            deleted,
+            created_time,
+            updated_time
+        FROM sys_route_permission
+        WHERE deleted = 0
+        ORDER BY sort ASC, created_time ASC
+    </select>
+
+</mapper>
