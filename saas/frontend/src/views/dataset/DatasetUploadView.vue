@@ -4,9 +4,8 @@
       <div class="toolbar-row">
         <div>
           <h2 class="section-title">数据集上传</h2>
-          <div class="section-subtitle">支持 tar.gz、tgz、zip 和文件夹上传。上传后目录统一保存为 存放位置/组织id/个人id/数据集名。</div>
+          <div class="section-subtitle">支持 tar.gz、tgz、zip 和文件夹上传。</div>
         </div>
-        <el-tag type="primary">仅显示当前用户上传成功的数据集</el-tag>
       </div>
 
       <div class="upload-grid">
@@ -81,7 +80,6 @@
       <div class="toolbar-row">
         <div>
           <h2 class="section-title">我的数据集</h2>
-          <div class="section-subtitle">支持查看详情、修改数据集名称以及物理删除。</div>
         </div>
         <el-button @click="loadDatasets">刷新列表</el-button>
       </div>

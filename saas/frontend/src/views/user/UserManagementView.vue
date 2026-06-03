@@ -4,7 +4,6 @@
       <div class="toolbar-row">
         <div>
           <h2 class="section-title">用户管理</h2>
-          <div class="section-subtitle">仅管理员可见，支持用户查询、增删改查与密码重置。</div>
         </div>
         <div class="toolbar-actions">
           <el-input v-model="keyword" placeholder="按姓名/邮箱/组织模糊查询" clearable @keyup.enter="loadUsers" />

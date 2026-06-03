@@ -4,8 +4,8 @@
       <div class="brand-block">
         <div class="brand-mark">L</div>
         <div>
-          <div class="brand-title">LeRobot 平台</div>
-          <div class="brand-subtitle">训练 / 推理一体化</div>
+          <div class="brand-title">LeRobot_Alohamini</div>
+          <div class="brand-subtitle">训练 / 推理一体化平台</div>
         </div>
       </div>
       <el-menu

@@ -2,7 +2,6 @@
   <section class="page-grid">
     <article class="glass-panel selector-panel">
       <h2 class="section-title">组织赋权</h2>
-      <div class="section-subtitle">给组织勾选可见页面，保存后刷新即可看到新菜单。</div>
       <el-select v-model="selectedOrganizationId" placeholder="请选择组织" style="width: 320px; margin-top: 18px" @change="loadOrganizationRoutes">
         <el-option
           v-for="organization in organizations"

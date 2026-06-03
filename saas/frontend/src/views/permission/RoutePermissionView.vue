@@ -2,7 +2,6 @@
   <section class="page-grid">
     <article class="glass-panel form-panel">
       <h2 class="section-title">录入页面路由</h2>
-      <div class="section-subtitle">新页面开发后，在这里录入路由、组件路径和图标，再到组织赋权页面分配权限。</div>
       <el-form :model="form" label-position="top" class="form-grid" style="margin-top: 18px">
         <el-form-item label="路由名称">
           <el-input v-model="form.routeName" placeholder="例如：training-list" />
@@ -35,7 +34,6 @@
 
     <article class="glass-panel table-panel">
       <h2 class="section-title">已登记页面</h2>
-      <div class="section-subtitle">管理员默认可见全部页面，普通组织用户只会看到已赋权且非管理员专属的页面。</div>
       <el-table :data="routePermissions" style="margin-top: 18px">
         <el-table-column prop="title" label="页面标题" min-width="140" />
         <el-table-column prop="routeName" label="路由名称" min-width="130" />

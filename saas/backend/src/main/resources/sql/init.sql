@@ -98,12 +98,23 @@ CREATE TABLE IF NOT EXISTS lerobot_saas_dev.sys_dataset (
     updated_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS lerobot_saas_dev.sys_model (
+    id VARCHAR(32) NOT NULL PRIMARY KEY,
+    model_code VARCHAR(100) NOT NULL,
+    model_name VARCHAR(150) NOT NULL,
+    sort INT NOT NULL DEFAULT 0,
+    deleted TINYINT NOT NULL DEFAULT 0,
+    created_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS lerobot_saas_test.sys_organization LIKE lerobot_saas_dev.sys_organization;
 CREATE TABLE IF NOT EXISTS lerobot_saas_test.sys_icon LIKE lerobot_saas_dev.sys_icon;
 CREATE TABLE IF NOT EXISTS lerobot_saas_test.sys_user LIKE lerobot_saas_dev.sys_user;
 CREATE TABLE IF NOT EXISTS lerobot_saas_test.sys_route_permission LIKE lerobot_saas_dev.sys_route_permission;
 CREATE TABLE IF NOT EXISTS lerobot_saas_test.sys_organization_route_permission LIKE lerobot_saas_dev.sys_organization_route_permission;
 CREATE TABLE IF NOT EXISTS lerobot_saas_test.sys_dataset LIKE lerobot_saas_dev.sys_dataset;
+CREATE TABLE IF NOT EXISTS lerobot_saas_test.sys_model LIKE lerobot_saas_dev.sys_model;
 
 INSERT INTO lerobot_saas_dev.sys_organization (id, organization_name, organization_code, description, sort, deleted, created_time, updated_time)
 VALUES ('1910000000000000001', 'Aloha', 'ALOHA', '默认组织', 0, 0, NOW(), NOW())
@@ -166,6 +177,7 @@ INSERT INTO lerobot_saas_dev.sys_route_permission (id, route_name, route_path, c
 ('1910000000000000014', 'permission-assign', '/permission-assign', 'views/permission/PermissionAssignView', '组织赋权', 'Checked', 0, 4, 0, NOW(), NOW()),
 ('1910000000000000015', 'profile', '/profile', 'views/profile/ProfileView', '个人中心', 'User', 0, 5, 0, NOW(), NOW()),
 ('1910000000000000017', 'dataset-upload', '/datasets', 'views/dataset/DatasetUploadView', '数据集上传', 'UploadFilled', 0, 6, 0, NOW(), NOW()),
+('1910000000000000018', 'model-management', '/models', 'views/model/ModelManagementView', '模型管理', 'Cpu', 1, 7, 0, NOW(), NOW()),
 ('1910000000000000016', 'user-management', '/user-management', 'views/user/UserManagementView', '用户管理', 'UserFilled', 1, 90, 0, NOW(), NOW())
 ON DUPLICATE KEY UPDATE
 route_name = VALUES(route_name),
@@ -185,6 +197,7 @@ INSERT INTO lerobot_saas_test.sys_route_permission (id, route_name, route_path, 
 ('1910000000000000014', 'permission-assign', '/permission-assign', 'views/permission/PermissionAssignView', '组织赋权', 'Checked', 0, 4, 0, NOW(), NOW()),
 ('1910000000000000015', 'profile', '/profile', 'views/profile/ProfileView', '个人中心', 'User', 0, 5, 0, NOW(), NOW()),
 ('1910000000000000017', 'dataset-upload', '/datasets', 'views/dataset/DatasetUploadView', '数据集上传', 'UploadFilled', 0, 6, 0, NOW(), NOW()),
+('1910000000000000018', 'model-management', '/models', 'views/model/ModelManagementView', '模型管理', 'Cpu', 1, 7, 0, NOW(), NOW()),
 ('1910000000000000016', 'user-management', '/user-management', 'views/user/UserManagementView', '用户管理', 'UserFilled', 1, 90, 0, NOW(), NOW())
 ON DUPLICATE KEY UPDATE
 route_name = VALUES(route_name),
@@ -234,6 +247,7 @@ INSERT INTO lerobot_saas_dev.sys_organization_route_permission (id, organization
 (REPLACE(UUID(), '-', ''), '1910000000000000001', '1910000000000000014', 0, 0, NOW(), NOW()),
 (REPLACE(UUID(), '-', ''), '1910000000000000001', '1910000000000000015', 0, 0, NOW(), NOW()),
 (REPLACE(UUID(), '-', ''), '1910000000000000001', '1910000000000000017', 0, 0, NOW(), NOW()),
+(REPLACE(UUID(), '-', ''), '1910000000000000001', '1910000000000000018', 0, 0, NOW(), NOW()),
 (REPLACE(UUID(), '-', ''), '1910000000000000001', '1910000000000000016', 0, 0, NOW(), NOW())
 ON DUPLICATE KEY UPDATE
 sort = VALUES(sort),
@@ -247,6 +261,7 @@ INSERT INTO lerobot_saas_test.sys_organization_route_permission (id, organizatio
 (REPLACE(UUID(), '-', ''), '1910000000000000001', '1910000000000000014', 0, 0, NOW(), NOW()),
 (REPLACE(UUID(), '-', ''), '1910000000000000001', '1910000000000000015', 0, 0, NOW(), NOW()),
 (REPLACE(UUID(), '-', ''), '1910000000000000001', '1910000000000000017', 0, 0, NOW(), NOW()),
+(REPLACE(UUID(), '-', ''), '1910000000000000001', '1910000000000000018', 0, 0, NOW(), NOW()),
 (REPLACE(UUID(), '-', ''), '1910000000000000001', '1910000000000000016', 0, 0, NOW(), NOW())
 ON DUPLICATE KEY UPDATE
 sort = VALUES(sort),

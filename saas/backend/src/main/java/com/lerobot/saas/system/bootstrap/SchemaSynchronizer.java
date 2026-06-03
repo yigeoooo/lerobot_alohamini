@@ -19,6 +19,8 @@ public class SchemaSynchronizer implements ApplicationRunner {
     private static final String ROUTE_PROFILE_ID = "1910000000000000015";
     private static final String ROUTE_USER_CENTER_ID = "1910000000000000016";
     private static final String ROUTE_DATASET_ID = "1910000000000000017";
+    private static final String ROUTE_MODEL_ID = "1910000000000000018";
+    private static final String ROUTE_TRAINING_ID = "1910000000000000019";
 
     private final JdbcTemplate jdbcTemplate;
     private final PasswordUtils passwordUtils;
@@ -136,6 +138,56 @@ public class SchemaSynchronizer implements ApplicationRunner {
                     updated_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
                 )
                 """);
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS sys_model (
+                    id VARCHAR(32) NOT NULL PRIMARY KEY,
+                    model_code VARCHAR(100) NOT NULL,
+                    model_name VARCHAR(150) NOT NULL,
+                    sort INT NOT NULL DEFAULT 0,
+                    deleted TINYINT NOT NULL DEFAULT 0,
+                    created_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                )
+                """);
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS sys_train_task (
+                    id VARCHAR(32) NOT NULL PRIMARY KEY,
+                    task_name VARCHAR(150) NOT NULL,
+                    organization_id VARCHAR(32) NOT NULL,
+                    user_id VARCHAR(32) NOT NULL,
+                    dataset_id VARCHAR(32) NOT NULL,
+                    dataset_name VARCHAR(150) NOT NULL,
+                    dataset_path VARCHAR(500) NOT NULL,
+                    model_id VARCHAR(32) NOT NULL,
+                    model_code VARCHAR(100) NOT NULL,
+                    model_name VARCHAR(150) NOT NULL,
+                    output_dir VARCHAR(500) NOT NULL,
+                    policy_repo_id VARCHAR(200) NOT NULL,
+                    device VARCHAR(50) NULL,
+                    wandb_enable TINYINT NULL,
+                    steps INT NULL,
+                    batch_size INT NULL,
+                    use_amp TINYINT NULL,
+                    optimizer_type VARCHAR(50) NULL,
+                    optimizer_lr VARCHAR(50) NULL,
+                    optimizer_weight_decay VARCHAR(50) NULL,
+                    optimizer_grad_clip_norm VARCHAR(50) NULL,
+                    log_freq INT NULL,
+                    save_freq INT NULL,
+                    policy_chunk_size INT NULL,
+                    policy_action_steps INT NULL,
+                    task_status VARCHAR(32) NOT NULL,
+                    process_id BIGINT NULL,
+                    command_text LONGTEXT NULL,
+                    log_path VARCHAR(500) NULL,
+                    exit_code INT NULL,
+                    error_message VARCHAR(1000) NULL,
+                    sort INT NOT NULL DEFAULT 0,
+                    deleted TINYINT NOT NULL DEFAULT 0,
+                    created_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                )
+                """);
     }
 
     private void syncColumns() {
@@ -145,6 +197,8 @@ public class SchemaSynchronizer implements ApplicationRunner {
         ensureBaseColumns("sys_route_permission");
         ensureBaseColumns("sys_organization_route_permission");
         ensureBaseColumns("sys_dataset");
+        ensureBaseColumns("sys_model");
+        ensureBaseColumns("sys_train_task");
 
         ensureColumn("sys_organization", "organization_name", "VARCHAR(100) NOT NULL");
         ensureColumn("sys_organization", "organization_code", "VARCHAR(100) NULL AFTER organization_name");
@@ -193,6 +247,40 @@ public class SchemaSynchronizer implements ApplicationRunner {
         ensureColumn("sys_dataset", "feature_keys", "TEXT NULL AFTER camera_count");
         ensureColumn("sys_dataset", "camera_keys", "TEXT NULL AFTER feature_keys");
         ensureColumn("sys_dataset", "metadata_json", "LONGTEXT NULL AFTER camera_keys");
+
+        ensureColumn("sys_model", "model_code", "VARCHAR(100) NOT NULL");
+        ensureColumn("sys_model", "model_name", "VARCHAR(150) NOT NULL AFTER model_code");
+
+        ensureColumn("sys_train_task", "task_name", "VARCHAR(150) NOT NULL");
+        ensureColumn("sys_train_task", "organization_id", "VARCHAR(32) NOT NULL AFTER task_name");
+        ensureColumn("sys_train_task", "user_id", "VARCHAR(32) NOT NULL AFTER organization_id");
+        ensureColumn("sys_train_task", "dataset_id", "VARCHAR(32) NOT NULL AFTER user_id");
+        ensureColumn("sys_train_task", "dataset_name", "VARCHAR(150) NOT NULL AFTER dataset_id");
+        ensureColumn("sys_train_task", "dataset_path", "VARCHAR(500) NOT NULL AFTER dataset_name");
+        ensureColumn("sys_train_task", "model_id", "VARCHAR(32) NOT NULL AFTER dataset_path");
+        ensureColumn("sys_train_task", "model_code", "VARCHAR(100) NOT NULL AFTER model_id");
+        ensureColumn("sys_train_task", "model_name", "VARCHAR(150) NOT NULL AFTER model_code");
+        ensureColumn("sys_train_task", "output_dir", "VARCHAR(500) NOT NULL AFTER model_name");
+        ensureColumn("sys_train_task", "policy_repo_id", "VARCHAR(200) NOT NULL AFTER output_dir");
+        ensureColumn("sys_train_task", "device", "VARCHAR(50) NULL AFTER policy_repo_id");
+        ensureColumn("sys_train_task", "wandb_enable", "TINYINT NULL AFTER device");
+        ensureColumn("sys_train_task", "steps", "INT NULL AFTER wandb_enable");
+        ensureColumn("sys_train_task", "batch_size", "INT NULL AFTER steps");
+        ensureColumn("sys_train_task", "use_amp", "TINYINT NULL AFTER batch_size");
+        ensureColumn("sys_train_task", "optimizer_type", "VARCHAR(50) NULL AFTER use_amp");
+        ensureColumn("sys_train_task", "optimizer_lr", "VARCHAR(50) NULL AFTER optimizer_type");
+        ensureColumn("sys_train_task", "optimizer_weight_decay", "VARCHAR(50) NULL AFTER optimizer_lr");
+        ensureColumn("sys_train_task", "optimizer_grad_clip_norm", "VARCHAR(50) NULL AFTER optimizer_weight_decay");
+        ensureColumn("sys_train_task", "log_freq", "INT NULL AFTER optimizer_grad_clip_norm");
+        ensureColumn("sys_train_task", "save_freq", "INT NULL AFTER log_freq");
+        ensureColumn("sys_train_task", "policy_chunk_size", "INT NULL AFTER save_freq");
+        ensureColumn("sys_train_task", "policy_action_steps", "INT NULL AFTER policy_chunk_size");
+        ensureColumn("sys_train_task", "task_status", "VARCHAR(32) NOT NULL AFTER policy_action_steps");
+        ensureColumn("sys_train_task", "process_id", "BIGINT NULL AFTER task_status");
+        ensureColumn("sys_train_task", "command_text", "LONGTEXT NULL AFTER process_id");
+        ensureColumn("sys_train_task", "log_path", "VARCHAR(500) NULL AFTER command_text");
+        ensureColumn("sys_train_task", "exit_code", "INT NULL AFTER log_path");
+        ensureColumn("sys_train_task", "error_message", "VARCHAR(1000) NULL AFTER exit_code");
     }
 
     private void ensureBaseColumns(String tableName) {
@@ -295,6 +383,8 @@ public class SchemaSynchronizer implements ApplicationRunner {
                 new Object[]{ROUTE_ASSIGN_ID, "permission-assign", "/permission-assign", "views/permission/PermissionAssignView", "组织赋权", "Checked", 0, 4},
                 new Object[]{ROUTE_PROFILE_ID, "profile", "/profile", "views/profile/ProfileView", "个人中心", "User", 0, 5},
                 new Object[]{ROUTE_DATASET_ID, "dataset-upload", "/datasets", "views/dataset/DatasetUploadView", "数据集上传", "UploadFilled", 0, 6},
+                new Object[]{ROUTE_MODEL_ID, "model-management", "/models", "views/model/ModelManagementView", "模型管理", "Cpu", 1, 7},
+                new Object[]{ROUTE_TRAINING_ID, "training-tasks", "/training-tasks", "views/training/TrainingTaskView", "模型训练", "TrendCharts", 0, 8},
                 new Object[]{ROUTE_USER_CENTER_ID, "user-management", "/user-management", "views/user/UserManagementView", "用户管理", "UserFilled", 1, 90}
         );
         for (Object[] route : routes) {
@@ -320,7 +410,7 @@ public class SchemaSynchronizer implements ApplicationRunner {
     }
 
     private void initDefaultRelations() {
-        for (String routeId : List.of(ROUTE_HOME_ID, ROUTE_ORG_ID, ROUTE_PERMISSION_ID, ROUTE_ASSIGN_ID, ROUTE_PROFILE_ID, ROUTE_DATASET_ID, ROUTE_USER_CENTER_ID)) {
+        for (String routeId : List.of(ROUTE_HOME_ID, ROUTE_ORG_ID, ROUTE_PERMISSION_ID, ROUTE_ASSIGN_ID, ROUTE_PROFILE_ID, ROUTE_DATASET_ID, ROUTE_MODEL_ID, ROUTE_TRAINING_ID, ROUTE_USER_CENTER_ID)) {
             jdbcTemplate.update("""
                     INSERT INTO sys_organization_route_permission (id, organization_id, route_permission_id, sort, deleted, created_time, updated_time)
                     SELECT REPLACE(UUID(), '-', ''), ?, ?, 0, 0, NOW(), NOW()

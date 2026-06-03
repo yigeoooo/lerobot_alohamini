@@ -4,7 +4,6 @@
       <div class="profile-header">
         <div>
           <h2 class="section-title">个人中心</h2>
-          <div class="section-subtitle">查看和修改个人资料、密码与头像图标。</div>
         </div>
         <el-avatar :size="72" :icon="resolveIcon(profile.avatarIconName)" class="profile-avatar" />
       </div>
