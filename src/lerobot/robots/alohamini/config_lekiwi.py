@@ -51,7 +51,7 @@ class LeKiwiConfig(RobotConfig):
     # alohamini1   – so-arm-5dof,          base sts3215, lift sts3215, lead=84 mm/rev
     # alohamini2   – am-follower-6dof,     base sts3215, lift sts3095, lead=131 mm/rev
     # alohamini2pro– am-follower-6dof-hd,  base sts3250, lift sts3095, lead=131 mm/rev
-    robot_model: str = "alohamini1"
+    robot_model: str = "alohamini2"
 
     # `max_relative_target` limits the magnitude of the relative positional target vector for safety purposes.
     # Set this to a positive scalar to have the same value for all motors, or a list that is the same length as
