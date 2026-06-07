@@ -18,7 +18,7 @@ from lerobot.utils.device_utils import auto_select_torch_device
 from lerobot.utils.feature_utils import build_dataset_frame, combine_feature_dicts, hw_to_dataset_features
 from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.utils import log_say
-from lerobot.utils.visualization_utils import init_rerun
+from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
 
 
 def main():
@@ -126,12 +126,15 @@ def main():
             obs_processed = robot_observation_processor(obs_raw)
             obs_frame = build_dataset_frame(dataset_features, obs_processed, prefix=OBS_STR)
 
+            action_dict = None
             action_tensor = engine.get_action(obs_frame)
             if action_tensor is not None:
                 action_dict = {k: action_tensor[i].item() for i, k in enumerate(ordered_action_keys)}
                 robot.send_action(robot_action_processor((action_dict, obs_raw)))
                 action_frame = build_dataset_frame(dataset_features, action_dict, prefix=ACTION)
                 dataset.add_frame({**obs_frame, **action_frame, "task": args.task_description})
+
+            log_rerun_data(observation=obs_frame, action=action_dict)
 
             dt = time.perf_counter() - loop_start
             if (sleep_t := control_interval - dt) > 0:
