@@ -49,6 +49,23 @@ Delete episodes and save to a new dataset at a specific path and with a new repo
         --operation.type delete_episodes \
         --operation.episode_indices "[0, 2, 5]"
 
+Trim episodes by keeping episode-local frame ranges, and delete episode 2:
+    lerobot-edit-dataset \
+        --repo_id lerobot/pusht \
+        --root /path/to/pusht \
+        --new_root /path/to/pusht_curated \
+        --operation.type trim_episodes \
+        --operation.episode_ranges '{"0": [15, 230], "4": [0, 180]}' \
+        --operation.delete_episode_indices "[2]"
+
+Delete frame ranges from episodes and stitch the remaining frames:
+    lerobot-edit-dataset \
+        --repo_id lerobot/pusht \
+        --root /path/to/pusht \
+        --new_root /path/to/pusht_curated \
+        --operation.type trim_episodes \
+        --operation.episode_delete_ranges '{"0": [40, 80], "3": [[10, 20], [120, 150]]}'
+
 Split dataset by fractions (pusht_train, pusht_val):
     lerobot-edit-dataset \
         --repo_id lerobot/pusht \
@@ -228,6 +245,7 @@ from lerobot.datasets import (
     reencode_dataset,
     remove_feature,
     split_dataset,
+    trim_episodes,
 )
 from lerobot.utils.constants import HF_LEROBOT_HOME
 from lerobot.utils.utils import init_logging
@@ -244,6 +262,17 @@ class OperationConfig(draccus.ChoiceRegistry, abc.ABC):
 @dataclass
 class DeleteEpisodesConfig(OperationConfig):
     episode_indices: list[int] | None = None
+
+
+@OperationConfig.register_subclass("trim_episodes")
+@dataclass
+class TrimEpisodesConfig(OperationConfig):
+    # Mapping from episode index to the half-open frame interval to keep: [start, end).
+    # CLI JSON object keys are accepted as strings and converted to ints by the handler.
+    episode_ranges: dict[str, list[int] | list[list[int]]] | None = None
+    # Mapping from episode index to half-open frame interval(s) to remove.
+    episode_delete_ranges: dict[str, list[int] | list[list[int]]] | None = None
+    delete_episode_indices: list[int] | None = None
 
 
 @OperationConfig.register_subclass("split")
@@ -395,6 +424,80 @@ def handle_delete_episodes(cfg: EditDatasetConfig) -> None:
     if cfg.push_to_hub:
         logging.info(f"Pushing to hub as {output_repo_id}")
         LeRobotDataset(output_repo_id, root=output_dir).push_to_hub()
+
+
+def handle_trim_episodes(cfg: EditDatasetConfig) -> None:
+    if not isinstance(cfg.operation, TrimEpisodesConfig):
+        raise ValueError("Operation config must be TrimEpisodesConfig")
+
+    if (
+        not cfg.operation.episode_ranges
+        and not cfg.operation.episode_delete_ranges
+        and not cfg.operation.delete_episode_indices
+    ):
+        raise ValueError(
+            "episode_ranges, episode_delete_ranges, or delete_episode_indices must be specified for trim_episodes"
+        )
+
+    episode_ranges = {}
+    if cfg.operation.episode_ranges:
+        for episode_idx, value in cfg.operation.episode_ranges.items():
+            episode_ranges[int(episode_idx)] = _parse_frame_ranges(value, f"episode_ranges[{episode_idx}]")
+
+    episode_delete_ranges = {}
+    if cfg.operation.episode_delete_ranges:
+        for episode_idx, value in cfg.operation.episode_delete_ranges.items():
+            episode_delete_ranges[int(episode_idx)] = _parse_frame_ranges(
+                value,
+                f"episode_delete_ranges[{episode_idx}]",
+            )
+
+    dataset = LeRobotDataset(cfg.repo_id, root=cfg.root)
+    output_repo_id, output_dir = get_output_path(
+        cfg.repo_id,
+        new_repo_id=cfg.new_repo_id,
+        root=cfg.root,
+        new_root=cfg.new_root,
+    )
+
+    # In case of in-place modification, make the dataset point to the backup directory
+    if output_dir == dataset.root:
+        dataset.root = dataset.root.with_name(dataset.root.name + "_old")
+        dataset.meta.root = dataset.root
+
+    logging.info(
+        "Trimming episodes in %s: ranges=%s delete=%s",
+        cfg.repo_id,
+        episode_ranges,
+        cfg.operation.delete_episode_indices,
+    )
+    new_dataset = trim_episodes(
+        dataset,
+        episode_ranges=episode_ranges,
+        episode_delete_ranges=episode_delete_ranges,
+        delete_episode_indices=cfg.operation.delete_episode_indices,
+        output_dir=output_dir,
+        repo_id=output_repo_id,
+    )
+
+    logging.info(f"Dataset saved to {output_dir}")
+    logging.info(f"Episodes: {new_dataset.meta.total_episodes}, Frames: {new_dataset.meta.total_frames}")
+
+    if cfg.push_to_hub:
+        logging.info(f"Pushing to hub as {output_repo_id}")
+        LeRobotDataset(output_repo_id, root=output_dir).push_to_hub()
+
+
+def _parse_frame_ranges(value: list[int] | list[list[int]], name: str):
+    if len(value) == 2 and all(isinstance(item, int) for item in value):
+        return (int(value[0]), int(value[1]))
+
+    ranges = []
+    for item in value:
+        if not isinstance(item, list) or len(item) != 2:
+            raise ValueError(f"{name} must be [start, end] or [[start, end], ...]")
+        ranges.append((int(item[0]), int(item[1])))
+    return ranges
 
 
 def handle_split(cfg: EditDatasetConfig) -> None:
@@ -782,6 +885,8 @@ def edit_dataset(cfg: EditDatasetConfig) -> None:
 
     if operation_type == "delete_episodes":
         handle_delete_episodes(cfg)
+    elif operation_type == "trim_episodes":
+        handle_trim_episodes(cfg)
     elif operation_type == "split":
         handle_split(cfg)
     elif operation_type == "merge":

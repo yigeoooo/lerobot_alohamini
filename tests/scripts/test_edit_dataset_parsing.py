@@ -29,6 +29,7 @@ from lerobot.scripts.lerobot_edit_dataset import (
     OperationConfig,
     RemoveFeatureConfig,
     SplitConfig,
+    TrimEpisodesConfig,
     _validate_config,
 )
 
@@ -45,6 +46,7 @@ class TestOperationTypeParsing:
         "type_name, expected_cls",
         [
             ("delete_episodes", DeleteEpisodesConfig),
+            ("trim_episodes", TrimEpisodesConfig),
             ("split", SplitConfig),
             ("merge", MergeConfig),
             ("remove_feature", RemoveFeatureConfig),
@@ -75,6 +77,7 @@ class TestOperationTypeParsing:
         "type_name, expected_cls",
         [
             ("delete_episodes", DeleteEpisodesConfig),
+            ("trim_episodes", TrimEpisodesConfig),
             ("split", SplitConfig),
             ("merge", MergeConfig),
             ("remove_feature", RemoveFeatureConfig),

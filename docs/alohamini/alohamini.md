@@ -225,6 +225,17 @@ lerobot-dataset-viz \
   --display-compressed-images
 ```
 
+For local browser review, trim, and delete:
+
+```bash
+PYTHONPATH=src python3 -m lerobot.scripts.lerobot_curate_dataset \
+  --root ~/.cache/huggingface/lerobot/$HF_USER/am2_bi_test \
+  --repo-id $HF_USER/am2_bi_test \
+  --open
+```
+
+Keep/Delete operations overwrite the local dataset immediately.
+
 ---
 
 ## 9. Training

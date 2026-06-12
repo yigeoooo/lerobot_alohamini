@@ -224,6 +224,32 @@ lerobot-dataset-viz \
 
 Once executed, the tool opens `rerun.io` and displays the camera streams, robot states, and actions for the selected episode.
 
+## Local Browser Curation
+
+Use the local curator module to review a local dataset in a browser, play episodes, keep frame ranges, delete frame ranges, or delete whole episodes. The tool edits the local dataset in place after each operation, so copy the dataset first if you need a rollback.
+
+For a dataset in the default Hugging Face cache:
+
+```bash
+PYTHONPATH=src python3 -m lerobot.scripts.lerobot_curate_dataset \
+    --root ~/.cache/huggingface/lerobot/<hf_user>/<dataset_name> \
+    --repo-id <hf_user>/<dataset_name> \
+    --open
+```
+
+For a custom local folder:
+
+```bash
+PYTHONPATH=src python3 -m lerobot.scripts.lerobot_curate_dataset \
+    --root /path/to/lerobot_dataset \
+    --repo-id my_org/my_dataset \
+    --host 127.0.0.1 \
+    --port 8765 \
+    --open
+```
+
+If `--repo-id` is omitted, the tool uses the dataset folder name. Video-backed datasets stream videos directly in the browser; image-backed datasets use frame previews.
+
 For advanced usage—including visualizing datasets stored on a remote server—run:
 
 ```bash

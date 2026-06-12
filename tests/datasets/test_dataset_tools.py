@@ -15,6 +15,7 @@
 # limitations under the License.
 """Tests for dataset tools utilities."""
 
+import shutil
 from unittest.mock import patch
 
 import numpy as np
@@ -25,6 +26,7 @@ pytest.importorskip("datasets", reason="datasets is required (install lerobot[da
 
 
 from lerobot.configs import VideoEncoderConfig
+from lerobot.datasets import LeRobotDataset
 from lerobot.datasets.dataset_tools import (
     add_features,
     convert_image_to_video_dataset,
@@ -35,8 +37,11 @@ from lerobot.datasets.dataset_tools import (
     reencode_dataset,
     remove_feature,
     split_dataset,
+    trim_episodes,
 )
 from lerobot.datasets.io_utils import load_info
+from lerobot.scripts.lerobot_curate_dataset import CuratorHandler, CuratorState, _parse_range_header
+from lerobot.utils.constants import ACTION, OBS_STATE
 from tests.datasets.test_video_encoding import _add_frames, require_h264, require_libsvtav1
 
 
@@ -147,6 +152,467 @@ def test_delete_empty_list(sample_dataset, tmp_path):
             episode_indices=[],
             output_dir=tmp_path / "filtered",
         )
+
+
+def _create_numeric_dataset(tmp_path):
+    root = tmp_path / "numeric_source"
+    features = {
+        ACTION: {
+            "dtype": "float32",
+            "shape": (2,),
+            "names": ["joint_0", "joint_1"],
+        },
+        OBS_STATE: {
+            "dtype": "float32",
+            "shape": (2,),
+            "names": ["joint_0", "joint_1"],
+        },
+    }
+    dataset = LeRobotDataset.create(
+        repo_id="test/source",
+        fps=10,
+        features=features,
+        root=root,
+        use_videos=False,
+    )
+
+    for episode_idx, length in enumerate([5, 4, 3]):
+        for frame_idx in range(length):
+            value = np.array([episode_idx * 10 + frame_idx, episode_idx], dtype=np.float32)
+            dataset.add_frame(
+                {
+                    ACTION: value,
+                    OBS_STATE: value + 0.5,
+                    "task": "test task",
+                }
+            )
+        dataset.save_episode()
+    dataset.finalize()
+
+    return LeRobotDataset("test/source", root=root)
+
+
+def _create_video_dataset(tmp_path, video_files_size_in_mb=None):
+    root = tmp_path / "video_source"
+    image_key = "observation.images.top"
+    features = {
+        ACTION: {
+            "dtype": "float32",
+            "shape": (2,),
+            "names": ["joint_0", "joint_1"],
+        },
+        OBS_STATE: {
+            "dtype": "float32",
+            "shape": (2,),
+            "names": ["joint_0", "joint_1"],
+        },
+        image_key: {
+            "dtype": "video",
+            "shape": (32, 32, 3),
+            "names": ["height", "width", "channel"],
+        },
+    }
+    dataset = LeRobotDataset.create(
+        repo_id="test/video_source",
+        fps=10,
+        features=features,
+        root=root,
+        use_videos=True,
+        video_files_size_in_mb=video_files_size_in_mb,
+    )
+
+    for episode_idx, length in enumerate([3, 2]):
+        for frame_idx in range(length):
+            value = np.array([episode_idx * 10 + frame_idx, episode_idx], dtype=np.float32)
+            image = np.full((32, 32, 3), episode_idx * 40 + frame_idx, dtype=np.uint8)
+            dataset.add_frame(
+                {
+                    ACTION: value,
+                    OBS_STATE: value + 0.5,
+                    image_key: image,
+                    "task": "test task",
+                }
+            )
+        dataset.save_episode()
+    dataset.finalize()
+
+    return LeRobotDataset("test/video_source", root=root)
+
+
+def test_curator_payload_includes_video_preview_metadata(tmp_path, monkeypatch):
+    """Curator exposes video keys and per-episode timestamps for direct browser playback."""
+    cache_dir = tmp_path / "hf_datasets_cache"
+    cache_dir.mkdir()
+    monkeypatch.setenv("HF_DATASETS_CACHE", str(cache_dir))
+
+    import datasets
+
+    monkeypatch.setattr(datasets.config, "HF_DATASETS_CACHE", cache_dir)
+
+    source = _create_video_dataset(tmp_path)
+    state = CuratorState(
+        dataset=source,
+        repo_id=source.repo_id,
+        video_backend=None,
+    )
+
+    payload = state.dataset_payload()
+
+    assert payload["video_keys"] == source.meta.video_keys
+    assert payload["camera_keys"] == source.meta.camera_keys
+    assert payload["episodes"][0]["videos"]
+    for key in source.meta.video_keys:
+        video_meta = payload["episodes"][0]["videos"][key]
+        source_ep = source.meta.episodes[0]
+        assert video_meta["from_timestamp"] == pytest.approx(source_ep[f"videos/{key}/from_timestamp"])
+        assert video_meta["to_timestamp"] == pytest.approx(source_ep[f"videos/{key}/to_timestamp"])
+
+
+@pytest.mark.parametrize(
+    ("header", "size", "expected"),
+    [
+        ("bytes=0-99", 1000, (0, 99)),
+        ("bytes=100-", 1000, (100, 999)),
+        ("bytes=-100", 1000, (900, 999)),
+        ("bytes=0-9999", 1000, (0, 999)),
+    ],
+)
+def test_parse_range_header_valid(header, size, expected):
+    assert _parse_range_header(header, size) == expected
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "items=0-99",
+        "bytes=100-99",
+        "bytes=1000-1001",
+        "bytes=-0",
+        "bytes=abc-def",
+    ],
+)
+def test_parse_range_header_invalid(header):
+    assert _parse_range_header(header, 1000) is None
+
+
+def test_curator_video_file_path_stays_inside_dataset_root(tmp_path, monkeypatch):
+    cache_dir = tmp_path / "hf_datasets_cache"
+    cache_dir.mkdir()
+    monkeypatch.setenv("HF_DATASETS_CACHE", str(cache_dir))
+
+    import datasets
+
+    monkeypatch.setattr(datasets.config, "HF_DATASETS_CACHE", cache_dir)
+
+    source = _create_video_dataset(tmp_path)
+    state = CuratorState(
+        dataset=source,
+        repo_id=source.repo_id,
+        video_backend=None,
+    )
+
+    video_key = source.meta.video_keys[0]
+    video_path = state.video_file_path(0, video_key)
+
+    assert video_path.exists()
+    assert video_path.is_relative_to(source.root.resolve())
+
+
+def test_curator_send_file_supports_http_range(tmp_path):
+    file_path = tmp_path / "clip.mp4"
+    file_path.write_bytes(b"0123456789")
+
+    class DummyHandler:
+        def __init__(self):
+            self.headers = {"Range": "bytes=2-5"}
+            self.responses = []
+            self.sent_headers = []
+            self.body = bytearray()
+
+        def send_response(self, status):
+            self.responses.append(status)
+
+        def send_header(self, name, value):
+            self.sent_headers.append((name.lower(), value))
+
+        def end_headers(self):
+            pass
+
+    handler = DummyHandler()
+    handler.wfile = handler
+    handler.write = handler.body.extend
+
+    CuratorHandler._send_file(handler, file_path, "video/mp4")
+
+    assert handler.responses == [206]
+    assert ("content-range", "bytes 2-5/10") in handler.sent_headers
+    assert ("content-length", "4") in handler.sent_headers
+    assert bytes(handler.body) == b"2345"
+
+
+def test_trim_episodes_reindexes_frames_and_drops_deleted_episode(tmp_path, monkeypatch):
+    """Test trimming frame ranges while deleting a full episode."""
+    cache_dir = tmp_path / "hf_datasets_cache"
+    cache_dir.mkdir()
+    monkeypatch.setenv("HF_DATASETS_CACHE", str(cache_dir))
+
+    import datasets
+
+    monkeypatch.setattr(datasets.config, "HF_DATASETS_CACHE", cache_dir)
+
+    source = _create_numeric_dataset(tmp_path)
+
+    trimmed = trim_episodes(
+        source,
+        episode_ranges={0: (1, 4), 2: (0, 2)},
+        delete_episode_indices=[1],
+        output_dir=tmp_path / "trimmed",
+        repo_id="test/trimmed",
+    )
+
+    assert trimmed.meta.total_episodes == 2
+    assert trimmed.meta.total_frames == 5
+    assert trimmed.meta.episodes[0]["length"] == 3
+    assert trimmed.meta.episodes[1]["length"] == 2
+
+    rows = trimmed.hf_dataset.with_format(None)
+
+    assert rows["episode_index"] == [0, 0, 0, 1, 1]
+    assert rows["frame_index"] == [0, 1, 2, 0, 1]
+    assert rows["index"] == [0, 1, 2, 3, 4]
+    assert rows["timestamp"] == pytest.approx([0.0, 0.1, 0.2, 0.0, 0.1])
+
+    action_values = [row[0] for row in rows[ACTION]]
+    assert action_values == [1.0, 2.0, 3.0, 20.0, 21.0]
+    assert trimmed.meta.stats[ACTION]["count"].tolist() == [5]
+    assert sorted(path.name for path in (trimmed.root / "data/chunk-000").glob("*.parquet")) == [
+        "file-000.parquet",
+        "file-001.parquet",
+    ]
+    assert trimmed.meta.episodes[0]["data/file_index"] == 0
+    assert trimmed.meta.episodes[1]["data/file_index"] == 1
+
+
+def test_trim_episodes_deletes_frame_range_and_stitches_episode(tmp_path, monkeypatch):
+    """Test deleting a frame range inside one episode and stitching the rest."""
+    cache_dir = tmp_path / "hf_datasets_cache"
+    cache_dir.mkdir()
+    monkeypatch.setenv("HF_DATASETS_CACHE", str(cache_dir))
+
+    import datasets
+
+    monkeypatch.setattr(datasets.config, "HF_DATASETS_CACHE", cache_dir)
+
+    source = _create_numeric_dataset(tmp_path)
+
+    trimmed = trim_episodes(
+        source,
+        episode_delete_ranges={0: (1, 4)},
+        output_dir=tmp_path / "deleted_range",
+        repo_id="test/deleted_range",
+    )
+
+    assert trimmed.meta.total_episodes == 3
+    assert trimmed.meta.total_frames == 9
+    assert trimmed.meta.episodes[0]["length"] == 2
+
+    rows = trimmed.hf_dataset.with_format(None)
+    first_episode_rows = [row for row in rows if row["episode_index"] == 0]
+    assert [row["frame_index"] for row in first_episode_rows] == [0, 1]
+    assert [row[ACTION][0] for row in first_episode_rows] == [0.0, 4.0]
+    assert [row["timestamp"] for row in first_episode_rows] == pytest.approx([0.0, 0.1])
+
+
+def test_trim_episodes_rejects_delete_range_for_deleted_episode(tmp_path, monkeypatch):
+    cache_dir = tmp_path / "hf_datasets_cache"
+    cache_dir.mkdir()
+    monkeypatch.setenv("HF_DATASETS_CACHE", str(cache_dir))
+
+    import datasets
+
+    monkeypatch.setattr(datasets.config, "HF_DATASETS_CACHE", cache_dir)
+
+    source = _create_numeric_dataset(tmp_path)
+
+    with pytest.raises(ValueError, match="fully deleted"):
+        trim_episodes(
+            source,
+            episode_delete_ranges={0: (1, 2)},
+            delete_episode_indices=[0],
+            output_dir=tmp_path / "invalid_overlap",
+            repo_id="test/invalid_overlap",
+        )
+
+
+def test_trim_episodes_reindexes_video_files_and_preserves_robot_alignment(tmp_path, monkeypatch):
+    """Deleting an episode should keep video, action, state, and timestamps aligned."""
+    cache_dir = tmp_path / "hf_datasets_cache"
+    cache_dir.mkdir()
+    monkeypatch.setenv("HF_DATASETS_CACHE", str(cache_dir))
+
+    import av
+    import datasets
+
+    monkeypatch.setattr(datasets.config, "HF_DATASETS_CACHE", cache_dir)
+
+    source = _create_video_dataset(tmp_path)
+    trimmed = trim_episodes(
+        source,
+        delete_episode_indices=[0],
+        output_dir=tmp_path / "video_trimmed",
+        repo_id="test/video_trimmed",
+    )
+
+    assert trimmed.meta.total_episodes == 1
+    assert trimmed.meta.total_frames == 2
+    assert trimmed.meta.episodes[0]["length"] == 2
+    assert trimmed.meta.episodes[0]["data/file_index"] == 0
+    assert sorted(path.name for path in (trimmed.root / "data/chunk-000").glob("*.parquet")) == [
+        "file-000.parquet"
+    ]
+
+    rows = trimmed.hf_dataset.with_format(None)
+    assert rows["episode_index"] == [0, 0]
+    assert rows["frame_index"] == [0, 1]
+    assert rows["index"] == [0, 1]
+    assert rows["timestamp"] == pytest.approx([0.0, 0.1])
+    np.testing.assert_allclose(rows[ACTION], [[10.0, 1.0], [11.0, 1.0]])
+    np.testing.assert_allclose(rows[OBS_STATE], [[10.5, 1.5], [11.5, 1.5]])
+
+    for video_key in trimmed.meta.video_keys:
+        video_meta = trimmed.meta.episodes[0]
+        assert video_meta[f"videos/{video_key}/chunk_index"] == 0
+        assert video_meta[f"videos/{video_key}/file_index"] == 0
+        assert video_meta[f"videos/{video_key}/from_timestamp"] == pytest.approx(0.0)
+        assert video_meta[f"videos/{video_key}/to_timestamp"] == pytest.approx(2 / trimmed.meta.fps)
+        video_path = trimmed.root / trimmed.meta.get_video_file_path(0, video_key)
+        assert video_path.name == "file-000.mp4"
+        assert video_path.exists()
+        with av.open(str(video_path)) as container:
+            decoded_means = [frame.to_ndarray(format="rgb24").mean() for frame in container.decode(video=0)]
+        assert len(decoded_means) == 2
+        assert decoded_means == pytest.approx([40.0, 41.0], abs=8.0)
+
+
+def test_trim_episodes_copies_unaffected_video_files(tmp_path, monkeypatch):
+    """Frame-range trims should not re-encode video files that contain only untouched episodes."""
+    cache_dir = tmp_path / "hf_datasets_cache"
+    cache_dir.mkdir()
+    monkeypatch.setenv("HF_DATASETS_CACHE", str(cache_dir))
+
+    import datasets
+
+    monkeypatch.setattr(datasets.config, "HF_DATASETS_CACHE", cache_dir)
+
+    source = _create_video_dataset(tmp_path, video_files_size_in_mb=0.0001)
+    video_key = source.meta.video_keys[0]
+    assert source.meta.get_video_file_path(0, video_key) != source.meta.get_video_file_path(1, video_key)
+    calls = []
+
+    def fake_keep_video(input_path, output_path, frame_ranges, fps, camera_encoder):
+        calls.append((input_path, output_path, frame_ranges))
+        shutil.copy(input_path, output_path)
+        return sum(end - start for start, end in frame_ranges)
+
+    monkeypatch.setattr(
+        "lerobot.datasets.dataset_tools._keep_episodes_from_video_with_av",
+        fake_keep_video,
+    )
+
+    trimmed = trim_episodes(
+        source,
+        episode_delete_ranges={0: (1, 2)},
+        output_dir=tmp_path / "video_trimmed",
+        repo_id="test/video_trimmed",
+    )
+
+    touched_source = source.root / source.meta.get_video_file_path(0, video_key)
+    untouched_source = source.root / source.meta.get_video_file_path(1, video_key)
+    assert len(calls) == 1
+    assert calls[0][0] == touched_source
+
+    untouched_output = trimmed.root / trimmed.meta.get_video_file_path(1, video_key)
+    assert untouched_output.read_bytes() == untouched_source.read_bytes()
+
+
+def test_curator_deletes_range_in_place_and_reloads_source(tmp_path, monkeypatch):
+    """Curator edits should overwrite the source dataset one operation at a time."""
+    cache_dir = tmp_path / "hf_datasets_cache"
+    cache_dir.mkdir()
+    monkeypatch.setenv("HF_DATASETS_CACHE", str(cache_dir))
+
+    import datasets
+
+    monkeypatch.setattr(datasets.config, "HF_DATASETS_CACHE", cache_dir)
+
+    source = _create_numeric_dataset(tmp_path)
+    source_root = source.root
+    state = CuratorState(
+        dataset=source,
+        repo_id=source.repo_id,
+        video_backend=None,
+    )
+
+    payload = state.update_edit({"episode": 0, "delete_start": 1, "delete_end": 4})
+
+    assert payload["root"] == str(source_root)
+    assert payload["selected_episode"] == 0
+    assert payload["total_episodes"] == 3
+    assert payload["total_frames"] == 9
+    assert not list(source_root.parent.glob(f".{source_root.name}.curate-*"))
+
+    reopened = LeRobotDataset(source.repo_id, root=source_root)
+    rows = reopened.hf_dataset.with_format(None)
+    first_episode_rows = [row for row in rows if row["episode_index"] == 0]
+
+    assert [row["frame_index"] for row in first_episode_rows] == [0, 1]
+    assert [row[ACTION][0] for row in first_episode_rows] == [0.0, 4.0]
+    assert [row[OBS_STATE][0] for row in first_episode_rows] == [0.5, 4.5]
+    assert [row["timestamp"] for row in first_episode_rows] == pytest.approx([0.0, 0.1])
+
+
+def test_curator_consecutive_edits_use_reopened_source(tmp_path, monkeypatch):
+    """Consecutive curator edits should persist immediately and use the rewritten dataset."""
+    cache_dir = tmp_path / "hf_datasets_cache"
+    cache_dir.mkdir()
+    monkeypatch.setenv("HF_DATASETS_CACHE", str(cache_dir))
+
+    import datasets
+
+    monkeypatch.setattr(datasets.config, "HF_DATASETS_CACHE", cache_dir)
+
+    source = _create_numeric_dataset(tmp_path)
+    source_root = source.root
+    state = CuratorState(
+        dataset=source,
+        repo_id=source.repo_id,
+        video_backend=None,
+    )
+
+    def reopened_first_episode_rows():
+        reopened = LeRobotDataset(source.repo_id, root=source_root)
+        rows = reopened.hf_dataset.with_format(None)
+        return [row for row in rows if row["episode_index"] == 0]
+
+    first_payload = state.update_edit({"episode": 0, "delete_start": 1, "delete_end": 4})
+    first_episode_rows = reopened_first_episode_rows()
+
+    assert first_payload["edit_version"] == 1
+    assert first_payload["total_frames"] == 9
+    assert [row["frame_index"] for row in first_episode_rows] == [0, 1]
+    assert [row["timestamp"] for row in first_episode_rows] == pytest.approx([0.0, 0.1])
+    np.testing.assert_allclose([row[ACTION] for row in first_episode_rows], [[0.0, 0.0], [4.0, 0.0]])
+    np.testing.assert_allclose([row[OBS_STATE] for row in first_episode_rows], [[0.5, 0.5], [4.5, 0.5]])
+
+    second_payload = state.update_edit({"episode": 0, "delete_start": 1, "delete_end": 2})
+    second_episode_rows = reopened_first_episode_rows()
+
+    assert second_payload["edit_version"] == 2
+    assert second_payload["total_frames"] == 8
+    assert [row["frame_index"] for row in second_episode_rows] == [0]
+    assert [row["timestamp"] for row in second_episode_rows] == pytest.approx([0.0])
+    np.testing.assert_allclose([row[ACTION] for row in second_episode_rows], [[0.0, 0.0]])
+    np.testing.assert_allclose([row[OBS_STATE] for row in second_episode_rows], [[0.5, 0.5]])
 
 
 def test_split_by_episodes(sample_dataset, tmp_path):
@@ -695,6 +1161,83 @@ def test_delete_episodes_preserves_tasks(sample_dataset, tmp_path):
 
     tasks_in_dataset = {str(item["task"]) for item in new_dataset}
     assert len(tasks_in_dataset) > 0
+
+
+def test_delete_episodes_preserves_chunk_settings(sample_dataset, tmp_path, monkeypatch):
+    """Deleting episodes should not reset dataset chunk/file size settings."""
+    cache_dir = tmp_path / "hf_datasets_cache"
+    cache_dir.mkdir()
+    monkeypatch.setenv("HF_DATASETS_CACHE", str(cache_dir))
+
+    import datasets
+
+    monkeypatch.setattr(datasets.config, "HF_DATASETS_CACHE", cache_dir)
+
+    sample_dataset.meta.update_chunk_settings(
+        chunks_size=17,
+        data_files_size_in_mb=23,
+        video_files_size_in_mb=29,
+    )
+    output_dir = tmp_path / "filtered"
+
+    with (
+        patch("lerobot.datasets.dataset_metadata.get_safe_version") as mock_get_safe_version,
+        patch("lerobot.datasets.dataset_metadata.snapshot_download") as mock_snapshot_download,
+    ):
+        mock_get_safe_version.return_value = "v3.0"
+        mock_snapshot_download.return_value = str(output_dir)
+
+        new_dataset = delete_episodes(
+            sample_dataset,
+            episode_indices=[0],
+            output_dir=output_dir,
+        )
+
+    assert new_dataset.meta.chunks_size == 17
+    assert new_dataset.meta.data_files_size_in_mb == 23
+    assert new_dataset.meta.video_files_size_in_mb == 29
+
+
+def test_delete_episodes_preserves_task_order(sample_dataset, tmp_path, monkeypatch):
+    """Task remapping should be deterministic and follow source task order."""
+    cache_dir = tmp_path / "hf_datasets_cache"
+    cache_dir.mkdir()
+    monkeypatch.setenv("HF_DATASETS_CACHE", str(cache_dir))
+
+    import datasets
+
+    monkeypatch.setattr(datasets.config, "HF_DATASETS_CACHE", cache_dir)
+
+    output_dir = tmp_path / "filtered"
+
+    with (
+        patch("lerobot.datasets.dataset_metadata.get_safe_version") as mock_get_safe_version,
+        patch("lerobot.datasets.dataset_metadata.snapshot_download") as mock_snapshot_download,
+    ):
+        mock_get_safe_version.return_value = "v3.0"
+        mock_snapshot_download.return_value = str(output_dir)
+
+        new_dataset = delete_episodes(
+            sample_dataset,
+            episode_indices=[0],
+            output_dir=output_dir,
+        )
+
+    source_rows = sample_dataset.hf_dataset.with_format(None)
+    used_task_names = {
+        sample_dataset.meta.tasks.iloc[old_task_idx].name
+        for old_episode_idx, old_task_idx in zip(
+            source_rows["episode_index"], source_rows["task_index"], strict=True
+        )
+        if old_episode_idx != 0
+    }
+    expected_tasks = [
+        sample_dataset.meta.tasks.iloc[old_task_idx].name
+        for old_task_idx in range(len(sample_dataset.meta.tasks))
+        if sample_dataset.meta.tasks.iloc[old_task_idx].name in used_task_names
+    ]
+
+    assert new_dataset.meta.tasks.index.tolist() == expected_tasks
 
 
 def test_split_three_ways(sample_dataset, tmp_path):

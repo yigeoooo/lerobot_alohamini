@@ -137,6 +137,9 @@ def delete_episodes(
         robot_type=dataset.meta.robot_type,
         root=output_dir,
         use_videos=len(dataset.meta.video_keys) > 0,
+        chunks_size=dataset.meta.chunks_size,
+        data_files_size_in_mb=dataset.meta.data_files_size_in_mb,
+        video_files_size_in_mb=dataset.meta.video_files_size_in_mb,
     )
 
     episode_mapping = {old_idx: new_idx for new_idx, old_idx in enumerate(episodes_to_keep)}
@@ -159,6 +162,574 @@ def delete_episodes(
 
     logging.info(f"Created new dataset with {len(episodes_to_keep)} episodes")
     return new_dataset
+
+
+def trim_episodes(
+    dataset: LeRobotDataset,
+    episode_ranges: dict[int, tuple[int, int] | list[tuple[int, int]]] | None = None,
+    episode_delete_ranges: dict[int, tuple[int, int] | list[tuple[int, int]]] | None = None,
+    delete_episode_indices: list[int] | None = None,
+    output_dir: str | Path | None = None,
+    repo_id: str | None = None,
+) -> LeRobotDataset:
+    """Trim frames from episodes and optionally delete whole episodes.
+
+    Args:
+        dataset: The source LeRobotDataset.
+        episode_ranges: Mapping from episode index to episode-local frame intervals
+            to keep. Ranges are half-open intervals: ``[start, end)``. A single
+            range or multiple ranges are accepted. Episodes not present in this
+            mapping are kept in full unless listed in ``delete_episode_indices``.
+        episode_delete_ranges: Mapping from episode index to episode-local frame
+            intervals to remove. These ranges are subtracted from the keep ranges.
+        delete_episode_indices: Episodes to remove completely.
+        output_dir: Root directory where the edited dataset will be stored.
+        repo_id: Edited dataset identifier.
+
+    Returns:
+        New LeRobotDataset with episodes reindexed from 0 and frame metadata
+        rewritten to match the retained data.
+    """
+    if episode_ranges is None:
+        episode_ranges = {}
+    if episode_delete_ranges is None:
+        episode_delete_ranges = {}
+    if delete_episode_indices is None:
+        delete_episode_indices = []
+
+    if not episode_ranges and not episode_delete_ranges and not delete_episode_indices:
+        raise ValueError("No trim ranges or episodes to delete were provided")
+
+    if repo_id is None:
+        repo_id = f"{dataset.repo_id}_trimmed"
+    output_dir = Path(output_dir) if output_dir is not None else HF_LEROBOT_HOME / repo_id
+
+    normalized_ranges = _normalize_trim_ranges(
+        dataset,
+        episode_ranges,
+        episode_delete_ranges,
+        delete_episode_indices,
+    )
+    episode_mapping = {old_idx: new_idx for new_idx, old_idx in enumerate(sorted(normalized_ranges))}
+
+    new_meta = LeRobotDatasetMetadata.create(
+        repo_id=repo_id,
+        fps=dataset.meta.fps,
+        features=dataset.meta.features,
+        robot_type=dataset.meta.robot_type,
+        root=output_dir,
+        use_videos=len(dataset.meta.video_keys) > 0,
+        chunks_size=dataset.meta.chunks_size,
+        data_files_size_in_mb=dataset.meta.data_files_size_in_mb,
+        video_files_size_in_mb=dataset.meta.video_files_size_in_mb,
+    )
+
+    task_mapping = _save_trimmed_tasks(dataset, new_meta, normalized_ranges)
+    data_metadata, episode_stats = _copy_and_trim_data(
+        dataset,
+        new_meta,
+        normalized_ranges,
+        episode_mapping,
+        task_mapping,
+    )
+
+    video_metadata = None
+    if dataset.meta.video_keys:
+        video_metadata = _copy_and_trim_videos(dataset, new_meta, normalized_ranges, episode_mapping)
+
+    _copy_and_trim_episodes_metadata(
+        dataset,
+        new_meta,
+        normalized_ranges,
+        episode_mapping,
+        data_metadata,
+        episode_stats,
+        video_metadata,
+    )
+
+    new_dataset = LeRobotDataset(
+        repo_id=repo_id,
+        root=output_dir,
+        image_transforms=dataset.image_transforms,
+        delta_timestamps=dataset.delta_timestamps,
+        tolerance_s=dataset.tolerance_s,
+    )
+
+    logging.info(
+        "Created trimmed dataset with %d episodes and %d frames",
+        new_dataset.meta.total_episodes,
+        new_dataset.meta.total_frames,
+    )
+    return new_dataset
+
+
+def _normalize_trim_ranges(
+    dataset: LeRobotDataset,
+    episode_ranges: dict[int, tuple[int, int] | list[tuple[int, int]]],
+    episode_delete_ranges: dict[int, tuple[int, int] | list[tuple[int, int]]],
+    delete_episode_indices: list[int],
+) -> dict[int, list[tuple[int, int]]]:
+    if dataset.meta.episodes is None:
+        dataset.meta.episodes = load_episodes(dataset.root)
+
+    total_episodes = dataset.meta.total_episodes
+    valid_indices = set(range(total_episodes))
+
+    invalid_ranges = set(episode_ranges) - valid_indices
+    if invalid_ranges:
+        raise ValueError(f"Invalid episode indices in episode_ranges: {invalid_ranges}")
+
+    invalid_delete_ranges = set(episode_delete_ranges) - valid_indices
+    if invalid_delete_ranges:
+        raise ValueError(f"Invalid episode indices in episode_delete_ranges: {invalid_delete_ranges}")
+
+    delete_set = set(delete_episode_indices)
+    invalid_deletes = delete_set - valid_indices
+    if invalid_deletes:
+        raise ValueError(f"Invalid episode indices in delete_episode_indices: {invalid_deletes}")
+
+    overlap = delete_set & set(episode_ranges)
+    if overlap:
+        raise ValueError(f"Episodes cannot be both trimmed and deleted: {overlap}")
+    delete_range_overlap = delete_set & set(episode_delete_ranges)
+    if delete_range_overlap:
+        raise ValueError(f"Episodes cannot have frame ranges deleted and be fully deleted: {delete_range_overlap}")
+
+    normalized = {}
+    for ep_idx in range(total_episodes):
+        if ep_idx in delete_set:
+            continue
+
+        episode_length = int(dataset.meta.episodes[ep_idx]["length"])
+        keep_ranges = _coerce_frame_ranges(
+            episode_ranges.get(ep_idx, (0, episode_length)),
+            episode_idx=ep_idx,
+            episode_length=episode_length,
+            field_name="episode_ranges",
+        )
+
+        if ep_idx in episode_delete_ranges:
+            delete_ranges = _coerce_frame_ranges(
+                episode_delete_ranges[ep_idx],
+                episode_idx=ep_idx,
+                episode_length=episode_length,
+                field_name="episode_delete_ranges",
+            )
+            keep_ranges = _subtract_frame_ranges(keep_ranges, delete_ranges)
+
+        if keep_ranges:
+            normalized[ep_idx] = keep_ranges
+
+    if not normalized:
+        raise ValueError("Cannot delete or trim away all episodes from dataset")
+
+    return normalized
+
+
+def _coerce_frame_ranges(
+    value: tuple[int, int] | list[tuple[int, int]],
+    episode_idx: int,
+    episode_length: int,
+    field_name: str,
+) -> list[tuple[int, int]]:
+    if _is_single_frame_range(value):
+        raw_ranges = [value]
+    else:
+        raw_ranges = value
+
+    ranges = []
+    for raw_range in raw_ranges:
+        if not _is_single_frame_range(raw_range):
+            raise ValueError(
+                f"Invalid {field_name} for episode {episode_idx}: expected [start, end] ranges"
+            )
+        start, end = int(raw_range[0]), int(raw_range[1])
+        if start < 0 or end > episode_length or start >= end:
+            raise ValueError(
+                f"Invalid {field_name} range for episode {episode_idx}: "
+                f"[{start}, {end}) with length {episode_length}"
+            )
+        ranges.append((start, end))
+
+    return _merge_frame_ranges(ranges)
+
+
+def _is_single_frame_range(value) -> bool:
+    return (
+        isinstance(value, (list, tuple))
+        and len(value) == 2
+        and all(isinstance(item, (int, np.integer)) for item in value)
+    )
+
+
+def _merge_frame_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    merged = []
+    for start, end in sorted(ranges):
+        if not merged or start > merged[-1][1]:
+            merged.append((start, end))
+        else:
+            prev_start, prev_end = merged[-1]
+            merged[-1] = (prev_start, max(prev_end, end))
+    return merged
+
+
+def _subtract_frame_ranges(
+    keep_ranges: list[tuple[int, int]],
+    delete_ranges: list[tuple[int, int]],
+) -> list[tuple[int, int]]:
+    remaining = keep_ranges
+    for delete_start, delete_end in delete_ranges:
+        next_remaining = []
+        for keep_start, keep_end in remaining:
+            if delete_end <= keep_start or delete_start >= keep_end:
+                next_remaining.append((keep_start, keep_end))
+                continue
+            if keep_start < delete_start:
+                next_remaining.append((keep_start, delete_start))
+            if delete_end < keep_end:
+                next_remaining.append((delete_end, keep_end))
+        remaining = next_remaining
+    return remaining
+
+
+def _save_trimmed_tasks(
+    src_dataset: LeRobotDataset,
+    dst_meta: LeRobotDatasetMetadata,
+    normalized_ranges: dict[int, list[tuple[int, int]]],
+) -> dict[int, int]:
+    ordered_tasks = []
+    seen = set()
+    for old_idx in sorted(normalized_ranges):
+        for task in src_dataset.meta.episodes[old_idx]["tasks"]:
+            if task not in seen:
+                ordered_tasks.append(task)
+                seen.add(task)
+
+    if not ordered_tasks:
+        raise ValueError("Trimmed dataset would not contain any task metadata")
+
+    dst_meta.save_episode_tasks(ordered_tasks)
+
+    task_mapping = {}
+    for old_task_idx in range(len(src_dataset.meta.tasks)):
+        task_name = src_dataset.meta.tasks.iloc[old_task_idx].name
+        new_task_idx = dst_meta.get_task_index(task_name)
+        if new_task_idx is not None:
+            task_mapping[old_task_idx] = new_task_idx
+
+    return task_mapping
+
+
+def _copy_and_trim_data(
+    src_dataset: LeRobotDataset,
+    dst_meta: LeRobotDatasetMetadata,
+    normalized_ranges: dict[int, list[tuple[int, int]]],
+    episode_mapping: dict[int, int],
+    task_mapping: dict[int, int],
+) -> tuple[dict[int, dict], dict[int, dict]]:
+    if src_dataset.meta.episodes is None:
+        src_dataset.meta.episodes = load_episodes(src_dataset.meta.root)
+
+    global_index = 0
+    episode_data_metadata: dict[int, dict] = {}
+    episode_stats: dict[int, dict] = {}
+
+    for old_idx in tqdm(sorted(normalized_ranges), desc="Processing episodes data"):
+        src_path = src_dataset.root / src_dataset.meta.get_data_file_path(old_idx)
+        if not src_path.exists():
+            raise ValueError(f"Data file not found for episode {old_idx}: {src_path}")
+
+        df = pd.read_parquet(src_path)
+        pieces = []
+        local_frame_index = 0
+        for start, end in normalized_ranges[old_idx]:
+            mask = (
+                (df["episode_index"] == old_idx)
+                & (df["frame_index"] >= start)
+                & (df["frame_index"] < end)
+            )
+            piece = df[mask].copy()
+            if len(piece) == 0:
+                continue
+            piece["frame_index"] = np.arange(
+                local_frame_index,
+                local_frame_index + len(piece),
+                dtype=np.int64,
+            )
+            local_frame_index += len(piece)
+            pieces.append(piece)
+
+        if not pieces:
+            continue
+
+        ep_df = pd.concat(pieces, ignore_index=True)
+        new_idx = episode_mapping[old_idx]
+        ep_len = len(ep_df)
+        ep_df["episode_index"] = new_idx
+        ep_df["timestamp"] = ep_df["frame_index"].astype(np.float64) / src_dataset.meta.fps
+        ep_df["index"] = np.arange(global_index, global_index + ep_len, dtype=np.int64)
+        ep_df["task_index"] = ep_df["task_index"].replace(task_mapping)
+
+        episode_stats[new_idx] = _compute_episode_stats_from_dataframe(ep_df, dst_meta.features)
+        chunk_idx, file_idx = _episode_chunk_file_index(new_idx, dst_meta.chunks_size)
+
+        dst_path = dst_meta.root / dst_meta.data_path.format(chunk_index=chunk_idx, file_index=file_idx)
+        dst_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_parquet(ep_df, dst_path, dst_meta)
+
+        episode_data_metadata[new_idx] = {
+            "data/chunk_index": chunk_idx,
+            "data/file_index": file_idx,
+            "dataset_from_index": int(ep_df["index"].min()),
+            "dataset_to_index": int(ep_df["index"].max() + 1),
+        }
+        global_index += ep_len
+
+    missing = set(episode_mapping.values()) - set(episode_data_metadata)
+    if missing:
+        raise ValueError(f"Trimmed episodes have no data rows after filtering: {sorted(missing)}")
+
+    return episode_data_metadata, episode_stats
+
+
+def _compute_episode_stats_from_dataframe(ep_df: pd.DataFrame, features: dict) -> dict:
+    meta_keys = {"index", "episode_index", "task_index", "frame_index", "timestamp"}
+    numeric_features = {
+        key: value
+        for key, value in features.items()
+        if value["dtype"] not in ["image", "video", "string", "language"] and key not in meta_keys
+    }
+
+    episode_data = {}
+    for key in numeric_features:
+        if key not in ep_df.columns:
+            continue
+        values = ep_df[key].to_numpy()
+        if len(values) == 0:
+            continue
+        first_value = values[0]
+        if isinstance(first_value, (np.ndarray, list, tuple)):
+            episode_data[key] = np.stack(values)
+        else:
+            episode_data[key] = np.asarray(values)
+
+    if not episode_data:
+        return {}
+
+    return compute_episode_stats(episode_data, numeric_features)
+
+
+def _copy_and_trim_videos(
+    src_dataset: LeRobotDataset,
+    dst_meta: LeRobotDatasetMetadata,
+    normalized_ranges: dict[int, list[tuple[int, int]]],
+    episode_mapping: dict[int, int],
+) -> dict[int, dict]:
+    if src_dataset.meta.episodes is None:
+        src_dataset.meta.episodes = load_episodes(src_dataset.meta.root)
+
+    episodes_video_metadata: dict[int, dict] = {new_idx: {} for new_idx in episode_mapping.values()}
+
+    for video_key in src_dataset.meta.video_keys:
+        logging.info(f"Processing videos for {video_key}")
+        camera_encoder = VideoEncoderConfig.from_video_info(
+            src_dataset.meta.info.features.get(video_key, {}).get("info")
+        )
+
+        if dst_meta.video_path is None:
+            raise ValueError("Destination metadata has no video_path defined")
+
+        file_to_episodes: dict[tuple[int, int], list[int]] = {}
+        for old_idx in sorted(normalized_ranges):
+            src_ep = src_dataset.meta.episodes[old_idx]
+            file_key = (
+                src_ep[f"videos/{video_key}/chunk_index"],
+                src_ep[f"videos/{video_key}/file_index"],
+            )
+            file_to_episodes.setdefault(file_key, []).append(old_idx)
+
+        for (src_chunk_idx, src_file_idx), kept_episodes_in_file in tqdm(
+            sorted(file_to_episodes.items()), desc=f"Processing {video_key} video files"
+        ):
+            assert src_dataset.meta.video_path is not None
+            src_video_path = src_dataset.root / src_dataset.meta.video_path.format(
+                video_key=video_key, chunk_index=src_chunk_idx, file_index=src_file_idx
+            )
+            if not src_video_path.exists():
+                raise ValueError(f"Video file not found for {video_key}: {src_video_path}")
+
+            dst_video_path = dst_meta.root / dst_meta.video_path.format(
+                video_key=video_key, chunk_index=src_chunk_idx, file_index=src_file_idx
+            )
+            dst_video_path.parent.mkdir(parents=True, exist_ok=True)
+
+            all_episodes_in_file = [
+                ep_idx
+                for ep_idx in range(src_dataset.meta.total_episodes)
+                if src_dataset.meta.episodes[ep_idx].get(f"videos/{video_key}/chunk_index") == src_chunk_idx
+                and src_dataset.meta.episodes[ep_idx].get(f"videos/{video_key}/file_index") == src_file_idx
+            ]
+            file_unchanged = set(all_episodes_in_file) == set(kept_episodes_in_file)
+            for old_idx in kept_episodes_in_file:
+                episode_length = int(src_dataset.meta.episodes[old_idx]["length"])
+                if normalized_ranges[old_idx] != [(0, episode_length)]:
+                    file_unchanged = False
+                    break
+
+            if file_unchanged:
+                shutil.copy(src_video_path, dst_video_path)
+                for old_idx in kept_episodes_in_file:
+                    new_idx = episode_mapping[old_idx]
+                    src_ep = src_dataset.meta.episodes[old_idx]
+                    episodes_video_metadata[new_idx][f"videos/{video_key}/chunk_index"] = src_chunk_idx
+                    episodes_video_metadata[new_idx][f"videos/{video_key}/file_index"] = src_file_idx
+                    episodes_video_metadata[new_idx][f"videos/{video_key}/from_timestamp"] = src_ep[
+                        f"videos/{video_key}/from_timestamp"
+                    ]
+                    episodes_video_metadata[new_idx][f"videos/{video_key}/to_timestamp"] = src_ep[
+                        f"videos/{video_key}/to_timestamp"
+                    ]
+                continue
+
+            frame_ranges: list[tuple[int, int]] = []
+            episode_lengths: dict[int, int] = {}
+            for old_idx in sorted(kept_episodes_in_file):
+                src_ep = src_dataset.meta.episodes[old_idx]
+                source_start_frame = round(
+                    src_ep[f"videos/{video_key}/from_timestamp"] * src_dataset.meta.fps
+                )
+                episode_ranges = [
+                    (source_start_frame + start, source_start_frame + end)
+                    for start, end in normalized_ranges[old_idx]
+                ]
+                frame_ranges.extend(episode_ranges)
+                episode_lengths[old_idx] = sum(end - start for start, end in normalized_ranges[old_idx])
+
+            written_frames = _keep_episodes_from_video_with_av(
+                src_video_path,
+                dst_video_path,
+                frame_ranges,
+                src_dataset.meta.fps,
+                camera_encoder,
+            )
+
+            expected_frames = sum(episode_lengths.values())
+            if written_frames != expected_frames:
+                raise ValueError(
+                    f"Trimmed video frame count mismatch for {video_key} "
+                    f"(chunk {src_chunk_idx}, file {src_file_idx}): "
+                    f"expected {expected_frames}, wrote {written_frames}"
+                )
+
+            cumulative_ts = 0.0
+            for old_idx in sorted(kept_episodes_in_file):
+                new_idx = episode_mapping[old_idx]
+                length = episode_lengths[old_idx]
+                duration = length / src_dataset.meta.fps
+                episodes_video_metadata[new_idx][f"videos/{video_key}/chunk_index"] = src_chunk_idx
+                episodes_video_metadata[new_idx][f"videos/{video_key}/file_index"] = src_file_idx
+                episodes_video_metadata[new_idx][f"videos/{video_key}/from_timestamp"] = cumulative_ts
+                episodes_video_metadata[new_idx][f"videos/{video_key}/to_timestamp"] = cumulative_ts + duration
+                cumulative_ts += duration
+
+    return episodes_video_metadata
+
+
+def _episode_chunk_file_index(episode_index: int, chunks_size: int) -> tuple[int, int]:
+    return episode_index // chunks_size, episode_index % chunks_size
+
+
+def _copy_and_trim_episodes_metadata(
+    src_dataset: LeRobotDataset,
+    dst_meta: LeRobotDatasetMetadata,
+    normalized_ranges: dict[int, list[tuple[int, int]]],
+    episode_mapping: dict[int, int],
+    data_metadata: dict[int, dict],
+    episode_stats: dict[int, dict],
+    video_metadata: dict[int, dict] | None = None,
+) -> None:
+    if src_dataset.meta.episodes is None:
+        src_dataset.meta.episodes = load_episodes(src_dataset.meta.root)
+
+    all_stats = []
+    total_frames = 0
+
+    for old_idx, new_idx in tqdm(
+        sorted(episode_mapping.items(), key=lambda item: item[1]), desc="Processing episodes metadata"
+    ):
+        new_length = sum(end - start for start, end in normalized_ranges[old_idx])
+        src_episode = src_dataset.meta.episodes[old_idx]
+
+        stats = _extract_episode_stats(src_dataset, old_idx)
+        for feature_key, feature_stats in stats.items():
+            if feature_key in src_dataset.meta.features and src_dataset.meta.features[feature_key][
+                "dtype"
+            ] in ["image", "video"]:
+                feature_stats["count"] = np.array([new_length])
+        stats.update(episode_stats.get(new_idx, {}))
+        all_stats.append(stats)
+
+        episode_meta = data_metadata[new_idx].copy()
+        if video_metadata and new_idx in video_metadata:
+            episode_meta.update(video_metadata[new_idx])
+
+        episode_dict = {
+            "episode_index": new_idx,
+            "tasks": src_episode["tasks"],
+            "length": new_length,
+        }
+        episode_dict.update(episode_meta)
+        episode_dict.update(flatten_dict({"stats": stats}))
+        dst_meta._save_episode_metadata(episode_dict)
+        total_frames += new_length
+
+    dst_meta.finalize()
+
+    dst_meta.info.total_episodes = len(episode_mapping)
+    dst_meta.info.total_frames = total_frames
+    dst_meta.info.total_tasks = len(dst_meta.tasks) if dst_meta.tasks is not None else 0
+    dst_meta.info.splits = {"train": f"0:{len(episode_mapping)}"}
+    write_info(dst_meta.info, dst_meta.root)
+
+    if all_stats:
+        aggregated_stats = aggregate_stats(all_stats)
+        filtered_stats = {key: value for key, value in aggregated_stats.items() if key in dst_meta.features}
+        write_stats(filtered_stats, dst_meta.root)
+
+
+def _extract_episode_stats(src_dataset: LeRobotDataset, episode_idx: int) -> dict:
+    src_episode_full = _load_episode_with_stats(src_dataset, episode_idx)
+    episode_stats = {}
+
+    for key in src_episode_full:
+        if not key.startswith("stats/"):
+            continue
+
+        stat_key = key.replace("stats/", "")
+        parts = stat_key.split("/")
+        if len(parts) != 2:
+            continue
+
+        feature_name, stat_name = parts
+        episode_stats.setdefault(feature_name, {})
+        value = src_episode_full[key]
+
+        if feature_name in src_dataset.meta.features:
+            feature_dtype = src_dataset.meta.features[feature_name]["dtype"]
+            if feature_dtype in ["image", "video"] and stat_name != "count":
+                if isinstance(value, np.ndarray) and value.dtype == object:
+                    flat_values = []
+                    for item in value:
+                        while isinstance(item, np.ndarray):
+                            item = item.flatten()[0]
+                        flat_values.append(item)
+                    value = np.array(flat_values, dtype=np.float64).reshape(3, 1, 1)
+                elif isinstance(value, np.ndarray) and value.shape == (3,):
+                    value = value.reshape(3, 1, 1)
+
+        episode_stats[feature_name][stat_name] = value
+
+    return episode_stats
 
 
 def split_dataset(
@@ -528,8 +1099,8 @@ def _copy_and_reindex_data(
             mask = df["episode_index"].isin(list(episode_mapping.keys()))
             task_series: pd.Series = df[mask]["task_index"]
             all_task_indices.update(task_series.unique().tolist())
-        tasks = [src_dataset.meta.tasks.iloc[idx].name for idx in all_task_indices]
-        dst_meta.save_episode_tasks(list(set(tasks)))
+        tasks = [src_dataset.meta.tasks.iloc[idx].name for idx in sorted(all_task_indices)]
+        dst_meta.save_episode_tasks(tasks)
 
     task_mapping = {}
     for old_task_idx in range(len(src_dataset.meta.tasks)):
@@ -595,7 +1166,7 @@ def _keep_episodes_from_video_with_av(
     episodes_to_keep: list[tuple[int, int]],
     fps: float,
     camera_encoder: VideoEncoderConfig,
-) -> None:
+) -> int:
     """Keep only specified episodes from a video file using PyAV.
 
     This function decodes frames from specified frame ranges and re-encodes them with
@@ -696,6 +1267,7 @@ def _keep_episodes_from_video_with_av(
 
     out.close()
     in_container.close()
+    return frame_count
 
 
 def _copy_and_reindex_videos(
