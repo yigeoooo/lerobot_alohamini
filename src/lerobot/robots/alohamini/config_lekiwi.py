@@ -79,8 +79,8 @@ class LeKiwiHostConfig:
     # Duration of the application
     connection_time_s: int = 6000
 
-    # Watchdog: stop the robot if no command is received for over 1.5 seconds.
-    watchdog_timeout_ms: int = 1500
+    # Watchdog: stop the robot if no command is received for over 1 second.
+    watchdog_timeout_ms: int = 1000
 
     # If robot jitters decrease the frequency and monitor cpu load with `top` in cmd
     max_loop_freq_hz: int = 30

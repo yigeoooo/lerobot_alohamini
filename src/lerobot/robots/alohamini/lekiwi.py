@@ -665,6 +665,14 @@ class LeKiwi(Robot):
         self.left_bus.sync_write("Goal_Velocity", dict.fromkeys(self.base_motors, 0), num_retry=0)
         logger.info("Base motors stopped")
 
+    def stop_lift(self):
+        self.lift.stop()
+        logger.info("Lift motor stopped")
+
+    def stop_motion(self):
+        self.stop_base()
+        self.stop_lift()
+
     def read_and_check_currents(self, limit_ma, print_currents):
         """Read left/right bus currents (mA), print them, and enforce overcurrent protection"""
         scale = 6.5  # sts3215 current unit conversion factor
@@ -705,7 +713,7 @@ class LeKiwi(Robot):
                 f"for {n} consecutive reads, disconnecting!"
             )
             try:
-                self.stop_base()
+                self.stop_motion()
             except Exception:
                 pass
             try:
@@ -719,7 +727,7 @@ class LeKiwi(Robot):
 
     @check_if_not_connected
     def disconnect(self):
-        self.stop_base()
+        self.stop_motion()
         self.left_bus.disconnect(self.config.disable_torque_on_disconnect)
         if self.right_bus:
             self.right_bus.disconnect(self.config.disable_torque_on_disconnect)
