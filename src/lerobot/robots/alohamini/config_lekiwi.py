@@ -51,7 +51,7 @@ class LeKiwiConfig(RobotConfig):
     # alohamini1   – so-arm-5dof,          base sts3215, lift sts3215, lead=84 mm/rev
     # alohamini2   – am-follower-6dof,     base sts3215, lift sts3095, lead=131 mm/rev
     # alohamini2pro– am-follower-6dof-hd,  base sts3250, lift sts3095, lead=131 mm/rev
-    robot_model: str = "alohamini1"
+    robot_model: str = "alohamini2"
 
     # `max_relative_target` limits the magnitude of the relative positional target vector for safety purposes.
     # Set this to a positive scalar to have the same value for all motors, or a list that is the same length as
@@ -79,8 +79,8 @@ class LeKiwiHostConfig:
     # Duration of the application
     connection_time_s: int = 6000
 
-    # Watchdog: stop the robot if no command is received for over 1.5 seconds.
-    watchdog_timeout_ms: int = 1500
+    # Watchdog: stop the robot if no command is received for over 1 second.
+    watchdog_timeout_ms: int = 1000
 
     # If robot jitters decrease the frequency and monitor cpu load with `top` in cmd
     max_loop_freq_hz: int = 30

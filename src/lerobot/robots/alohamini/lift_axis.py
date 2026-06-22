@@ -30,7 +30,7 @@ class LiftAxisConfig:
 
     # Homing (drive downward to hard stop → rebound slightly)
     home_down_speed: int = 1300      # Downward target velocity in velocity mode
-    home_stall_current_ma: int = 150  # Stall current threshold; used when no current feedback
+    home_stall_current_ma: int = 300  # Stall current threshold; used when no current feedback
     home_backoff_deg: float = 5.0
 
     # Velocity closed-loop gains
@@ -214,3 +214,9 @@ class LiftAxis:
         # ticks = int(self._bus.read("Present_Position", self.cfg.name, normalize=False))
         # print(f"[lift_axis] Z-axis ticks: {ticks}")
         # print(f"[lift_axis] Z-axis height: {self.get_height_mm():.2f} mm")
+
+    def stop(self) -> None:
+        """Stop any ongoing lift motion in velocity mode."""
+        if not self.enabled:
+            return
+        self._bus.write("Goal_Velocity", self.cfg.name, 0)
