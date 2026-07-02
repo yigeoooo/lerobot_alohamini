@@ -57,10 +57,14 @@ def main():
         default="alohamini1",
         choices=["alohamini1", "alohamini2", "alohamini2pro"],
         help=(
-            "Robot model — drives follower arm profile, base motors, lift motor, and lead screw pitch.\n"
-            "  alohamini1   : so-arm-5dof,         base sts3215, lift sts3215, lead=84 mm/rev\n"
-            "  alohamini2   : am-follower-6dof,    base sts3215, lift sts3095, lead=131 mm/rev\n"
-            "  alohamini2pro: am-follower-6dof-hd, base sts3250, lift sts3095, lead=131 mm/rev"
+            "Robot model — drives follower arm profile, base motors, lift motor, lead screw pitch, "
+            "and chassis kinematics.\n"
+            "  alohamini1   : so-arm-5dof,         base sts3215, lift sts3215, lead=84 mm/rev,  "
+            "wheel=0.05m, radius=0.125m\n"
+            "  alohamini2   : am-follower-6dof,    base sts3215, lift sts3095, lead=131 mm/rev, "
+            "wheel=0.063m, radius=0.195m\n"
+            "  alohamini2pro: am-follower-6dof-hd, base sts3250, lift sts3095, lead=131 mm/rev, "
+            "wheel=0.063m, radius=0.195m"
         ),
     )
     parser.add_argument(

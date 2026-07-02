@@ -59,18 +59,24 @@ ROBOT_SPECS: dict[str, dict] = {
         "base_motor": "sts3215",
         "lift_motor": "sts3215",
         "lead_mm_per_rev": 84.0,
+        "wheel_radius": 0.05,
+        "base_radius": 0.125,
     },
     "alohamini2": {
         "arm_profile": "am-follower-6dof",
         "base_motor": "sts3215",
         "lift_motor": "sts3095",
         "lead_mm_per_rev": 131.0,
+        "wheel_radius": 0.063,
+        "base_radius": 0.195,
     },
     "alohamini2pro": {
         "arm_profile": "am-follower-6dof-hd",
         "base_motor": "sts3250",
         "lift_motor": "sts3095",
         "lead_mm_per_rev": 131.0,
+        "wheel_radius": 0.063,
+        "base_radius": 0.195,
     },
 }
 

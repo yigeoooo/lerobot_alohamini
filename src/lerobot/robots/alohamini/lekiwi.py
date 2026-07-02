@@ -119,6 +119,8 @@ class LeKiwi(Robot):
         arm_profile = specs["arm_profile"]
         bm = specs["base_motor"]
         lm = specs["lift_motor"]
+        self.wheel_radius = specs["wheel_radius"]
+        self.base_radius = specs["base_radius"]
 
         left_arm_motors_cfg = _make_arm_motors("arm_left", arm_profile, norm_mode_body)
         right_arm_motors_cfg = _make_arm_motors("arm_right", arm_profile, norm_mode_body)
@@ -430,8 +432,8 @@ class LeKiwi(Robot):
         x: float,
         y: float,
         theta: float,
-        wheel_radius: float = 0.05,
-        base_radius: float = 0.125,
+        wheel_radius: float | None = None,
+        base_radius: float | None = None,
         max_raw: int = 3000,
     ) -> dict:
         """
@@ -455,6 +457,9 @@ class LeKiwi(Robot):
             using _degps_to_raw(). If any command exceeds max_raw, all commands
             are scaled down proportionally.
         """
+        wheel_radius = self.wheel_radius if wheel_radius is None else wheel_radius
+        base_radius = self.base_radius if base_radius is None else base_radius
+
         # Convert rotational velocity from deg/s to rad/s.
         theta_rad = theta * (np.pi / 180.0)
         # Create the body velocity vector [x, y, theta_rad].
@@ -495,8 +500,8 @@ class LeKiwi(Robot):
         left_wheel_speed,
         back_wheel_speed,
         right_wheel_speed,
-        wheel_radius: float = 0.05,
-        base_radius: float = 0.125,
+        wheel_radius: float | None = None,
+        base_radius: float | None = None,
     ) -> dict[str, Any]:
         """
         Convert wheel raw command feedback back into body-frame velocities.
@@ -509,6 +514,8 @@ class LeKiwi(Robot):
         Returns:
           A dict (x.vel, y.vel, theta.vel) all in m/s
         """
+        wheel_radius = self.wheel_radius if wheel_radius is None else wheel_radius
+        base_radius = self.base_radius if base_radius is None else base_radius
 
         # Convert each raw command back to an angular speed in deg/s.
         wheel_degps = np.array(
