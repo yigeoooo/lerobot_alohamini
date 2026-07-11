@@ -3,7 +3,7 @@ import inspect
 import os
 import time
 
-from lerobot.robots.alohamini import LeKiwiClient, LeKiwiClientConfig
+from lerobot.robots.alohamini import AlohaMiniClient, AlohaMiniClientConfig
 from lerobot.teleoperators.keyboard.teleop_keyboard import KeyboardTeleop, KeyboardTeleopConfig
 from lerobot.teleoperators.bi_so_leader import BiSOLeader, BiSOLeaderConfig
 from lerobot.teleoperators.so_leader import SOLeaderConfig
@@ -15,7 +15,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--no_robot", action="store_true", help="Do not connect robot, only print actions")
 parser.add_argument("--no_leader", action="store_true", help="Do not connect leader arm, only perform keyboard-controlled actions.")
 parser.add_argument("--fps", type=int, default=30, help="Main loop frequency (frames per second)")
-parser.add_argument("--remote_ip", type=str, default="127.0.0.1", help="LeKiwi host IP address")
+parser.add_argument("--remote_ip", type=str, default="127.0.0.1", help="AlohaMini host IP address")
 parser.add_argument(
     "--robot_model",
     type=str,
@@ -45,7 +45,7 @@ if NO_ROBOT:
 if NO_LEADER:
     print("🧪 NO_LEADER mode enabled: leader arm will not connect, only print actions.")
 # Create configs
-robot_config = LeKiwiClientConfig(
+robot_config = AlohaMiniClientConfig(
     remote_ip=args.remote_ip,
     id="my_alohamini",
     robot_model=args.robot_model,
@@ -64,7 +64,7 @@ bi_cfg = BiSOLeaderConfig(
 leader = BiSOLeader(bi_cfg)
 keyboard_config = KeyboardTeleopConfig(id="my_laptop_keyboard")
 keyboard = KeyboardTeleop(keyboard_config)
-robot = LeKiwiClient(robot_config)
+robot = AlohaMiniClient(robot_config)
 
 # Connection logic
 if not NO_ROBOT:
@@ -81,7 +81,7 @@ keyboard.connect()
 
 
 
-init_rerun(session_name="lekiwi_teleop")
+init_rerun(session_name="alohamini_teleop")
 
 if not robot.is_connected or not leader.is_connected or not keyboard.is_connected:
     print("⚠️ Warning: Some devices are not connected! Still running for debug.")

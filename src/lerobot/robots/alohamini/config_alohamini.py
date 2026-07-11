@@ -20,7 +20,7 @@ from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig
 from ..config import RobotConfig
 
 
-def lekiwi_cameras_config() -> dict[str, CameraConfig]:
+def alohamini_cameras_config() -> dict[str, CameraConfig]:
     return {
         # "forward": OpenCVCameraConfig(
         #     index_or_path="/dev/am_camera_forward", fps=30, width=640, height=480, rotation=Cv2Rotation.NO_ROTATION
@@ -42,7 +42,7 @@ def lekiwi_cameras_config() -> dict[str, CameraConfig]:
 
 @RobotConfig.register_subclass("alohamini")
 @dataclass
-class LeKiwiConfig(RobotConfig):
+class AlohaMiniConfig(RobotConfig):
     left_port: str = "/dev/am_arm_follower_left"  # port to connect to the bus
     right_port: str = "/dev/am_arm_follower_right"  # port to connect to the bus
     disable_torque_on_disconnect: bool = True
@@ -58,7 +58,7 @@ class LeKiwiConfig(RobotConfig):
     # the number of motors in your follower arms.
     max_relative_target: int | None = None
 
-    cameras: dict[str, CameraConfig] = field(default_factory=lekiwi_cameras_config)
+    cameras: dict[str, CameraConfig] = field(default_factory=alohamini_cameras_config)
 
     # Set to `True` for backward compatibility with previous policies/dataset
     use_degrees: bool = False
@@ -71,7 +71,7 @@ class LeKiwiConfig(RobotConfig):
 
 
 @dataclass
-class LeKiwiHostConfig:
+class AlohaMiniHostConfig:
     # Network Configuration
     port_zmq_cmd: int = 5555
     port_zmq_observations: int = 5556
@@ -90,7 +90,7 @@ class LeKiwiHostConfig:
 
 @RobotConfig.register_subclass("alohamini_client")
 @dataclass
-class LeKiwiClientConfig(RobotConfig):
+class AlohaMiniClientConfig(RobotConfig):
     # Network Configuration
     remote_ip: str
     port_zmq_cmd: int = 5555
@@ -122,7 +122,7 @@ class LeKiwiClientConfig(RobotConfig):
         }
     )
 
-    cameras: dict[str, CameraConfig] = field(default_factory=lekiwi_cameras_config)
+    cameras: dict[str, CameraConfig] = field(default_factory=alohamini_cameras_config)
 
     polling_timeout_ms: int = 15
     connect_timeout_s: int = 5

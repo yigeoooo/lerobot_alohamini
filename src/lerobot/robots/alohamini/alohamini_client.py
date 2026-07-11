@@ -31,7 +31,7 @@ from lerobot.utils.decorators import check_if_already_connected, check_if_not_co
 from lerobot.utils.errors import DeviceNotConnectedError
 
 from ..robot import Robot
-from .config_lekiwi import LeKiwiClientConfig
+from .config_alohamini import AlohaMiniClientConfig
 from .model_specs import arm_state_keys_for_robot_model
 from .lift_axis import LiftAxisConfig
 
@@ -40,11 +40,11 @@ logging.basicConfig(
     format="[%(filename)s:%(lineno)d] %(message)s"
 )
 
-class LeKiwiClient(Robot):
-    config_class = LeKiwiClientConfig
+class AlohaMiniClient(Robot):
+    config_class = AlohaMiniClientConfig
     name = "alohamini_client"
 
-    def __init__(self, config: LeKiwiClientConfig):
+    def __init__(self, config: AlohaMiniClientConfig):
         import zmq
 
         self._zmq = zmq

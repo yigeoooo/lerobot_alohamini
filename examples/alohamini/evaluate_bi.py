@@ -12,7 +12,7 @@ from lerobot.policies import get_policy_class, make_pre_post_processors
 from lerobot.processor import make_default_processors
 from lerobot.rollout.inference.factory import SyncInferenceConfig, create_inference_engine
 from lerobot.rollout.robot_wrapper import ThreadSafeRobot
-from lerobot.robots.alohamini import LeKiwiClient, LeKiwiClientConfig
+from lerobot.robots.alohamini import AlohaMiniClient, AlohaMiniClientConfig
 from lerobot.utils.constants import ACTION, OBS_STR
 from lerobot.utils.device_utils import auto_select_torch_device
 from lerobot.utils.feature_utils import build_dataset_frame, combine_feature_dicts, hw_to_dataset_features
@@ -30,7 +30,7 @@ def main():
     parser.add_argument("--hf_model_id", type=str, required=True)
     parser.add_argument("--hf_dataset_id", type=str, required=True)
     parser.add_argument("--remote_ip", type=str, default="127.0.0.1")
-    parser.add_argument("--robot_id", type=str, default="lekiwi")
+    parser.add_argument("--robot_id", type=str, default="my_alohamini")
     parser.add_argument("--robot_model", type=str, default="alohamini1",
                         choices=["alohamini1", "alohamini2", "alohamini2pro"],
                         help="Must match the robot_model on the Pi host side")
@@ -46,9 +46,9 @@ def main():
     policy.eval()
 
     # === Robot ===
-    robot_config = LeKiwiClientConfig(remote_ip=args.remote_ip, id=args.robot_id,
-                                      robot_model=args.robot_model)
-    robot = LeKiwiClient(robot_config)
+    robot_config = AlohaMiniClientConfig(remote_ip=args.remote_ip, id=args.robot_id,
+                                         robot_model=args.robot_model)
+    robot = AlohaMiniClient(robot_config)
     robot.connect()
     robot_wrapper = ThreadSafeRobot(robot)
 

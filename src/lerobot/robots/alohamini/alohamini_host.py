@@ -24,12 +24,12 @@ import sys
 import cv2
 import zmq
 
-from .config_lekiwi import LeKiwiConfig, LeKiwiHostConfig
-from .lekiwi import LeKiwi
+from .alohamini import AlohaMini
+from .config_alohamini import AlohaMiniConfig, AlohaMiniHostConfig
 
 
-class LeKiwiHost:
-    def __init__(self, config: LeKiwiHostConfig):
+class AlohaMiniHost:
+    def __init__(self, config: AlohaMiniHostConfig):
         self.zmq_context = zmq.Context()
         self.zmq_cmd_socket = self.zmq_context.socket(zmq.PULL)
         self.zmq_cmd_socket.setsockopt(zmq.CONFLATE, 1)
@@ -50,7 +50,7 @@ class LeKiwiHost:
  
 
 def main():
-    parser = argparse.ArgumentParser(description="Run AlohaMini LeKiwi host process")
+    parser = argparse.ArgumentParser(description="Run AlohaMini host process")
     parser.add_argument(
         "--robot_model",
         type=str,
@@ -74,22 +74,22 @@ def main():
     )
     args = parser.parse_args()
 
-    logging.info("Configuring LeKiwi")
-    robot_config = LeKiwiConfig()
+    logging.info("Configuring AlohaMini")
+    robot_config = AlohaMiniConfig()
     robot_config.id = "AlohaMiniRobot"
     robot_config.robot_model = args.robot_model
     robot_config.no_follower = args.no_follower
     if args.no_follower:
         logging.info("no_follower mode: follower arms will not connect, only base and lift operate.")
-    robot = LeKiwi(robot_config)
+    robot = AlohaMini(robot_config)
 
 
     logging.info("Connecting AlohaMini")
     robot.connect()
 
     logging.info("Starting HostAgent")
-    host_config = LeKiwiHostConfig()
-    host = LeKiwiHost(host_config)
+    host_config = AlohaMiniHostConfig()
+    host = AlohaMiniHost(host_config)
 
     last_cmd_time = time.time()
     watchdog_active = False
@@ -157,7 +157,5 @@ def main():
         host.disconnect()
 
     logging.info("Finished AlohaMini cleanly")
-
-
 if __name__ == "__main__":
     main()

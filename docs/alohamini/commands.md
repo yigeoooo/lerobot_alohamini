@@ -73,10 +73,10 @@ Enable or disable robot cameras by editing the camera config:
 
 ```bash
 sudo apt install micro
-sudo micro src/lerobot/robots/alohamini/config_lekiwi.py
+sudo micro src/lerobot/robots/alohamini/config_alohamini.py
 ```
 
-In `lekiwi_cameras_config()`, uncomment a camera block to enable it, or comment it out to disable it.
+In `alohamini_cameras_config()`, uncomment a camera block to enable it, or comment it out to disable it.
 After changing camera config, restart the AlohaMini host process.
 
 ## Persistent Arm Ports
@@ -132,7 +132,7 @@ Verify the stable names:
 ls /dev/am*
 ```
 
-Use follower paths in `src/lerobot/robots/alohamini/config_lekiwi.py` on the Pi / robot host:
+Use follower paths in `src/lerobot/robots/alohamini/config_alohamini.py` on the Pi / robot host:
 
 ```python
 left_port = "/dev/am_arm_follower_left"
@@ -150,28 +150,36 @@ right_arm_config=SOLeaderConfig(port="/dev/am_arm_leader_right", ...)
 
 Run these on the Raspberry Pi / robot host.
 
+Calibrate only, then exit:
+
+```bash
+python -m lerobot.robots.alohamini.alohamini_calibrate --robot_model alohamini2
+```
+
+The host commands below also check calibration and will prompt calibration automatically if it is missing.
+
 AlohaMini 1:
 
 ```bash
-python -m lerobot.robots.alohamini.lekiwi_host --robot_model alohamini1
+python -m lerobot.robots.alohamini.alohamini_host --robot_model alohamini1
 ```
 
 AlohaMini 2:
 
 ```bash
-python -m lerobot.robots.alohamini.lekiwi_host --robot_model alohamini2
+python -m lerobot.robots.alohamini.alohamini_host --robot_model alohamini2
 ```
 
 AlohaMini 2 Pro:
 
 ```bash
-python -m lerobot.robots.alohamini.lekiwi_host --robot_model alohamini2pro
+python -m lerobot.robots.alohamini.alohamini_host --robot_model alohamini2pro
 ```
 
 Base and lift only:
 
 ```bash
-python -m lerobot.robots.alohamini.lekiwi_host --robot_model alohamini2 --no_follower
+python -m lerobot.robots.alohamini.alohamini_host --robot_model alohamini2 --no_follower
 ```
 
 ## Teleoperation
@@ -584,5 +592,5 @@ DEVICE=cuda make test-end-to-end
 Find AlohaMini references:
 
 ```bash
-rg -n "alohamini|lekiwi|record_bi|teleoperate_bi|evaluate_bi" src examples docs
+rg -n "alohamini|record_bi|teleoperate_bi|evaluate_bi" src examples docs
 ```

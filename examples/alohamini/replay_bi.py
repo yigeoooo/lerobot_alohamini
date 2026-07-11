@@ -2,8 +2,7 @@ import time
 import argparse
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
-from lerobot.robots.alohamini.config_lekiwi import LeKiwiClientConfig
-from lerobot.robots.alohamini.lekiwi_client import LeKiwiClient
+from lerobot.robots.alohamini import AlohaMiniClient, AlohaMiniClientConfig
 from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.utils import log_say
 
@@ -12,8 +11,8 @@ parser.add_argument("--dataset", type=str, required=True,
                     help="Dataset repo_id, e.g. liyitenga/record_20250914225057")
 parser.add_argument("--episode", type=int, default=0,
                     help="Episode index to replay (default 0)")
-parser.add_argument("--remote_ip", type=str, default="127.0.0.1", help="LeKiwi host IP address")
-parser.add_argument("--robot_id", type=str, default="lekiwi", help="Robot ID")
+parser.add_argument("--remote_ip", type=str, default="127.0.0.1", help="AlohaMini host IP address")
+parser.add_argument("--robot_id", type=str, default="my_alohamini", help="Robot ID")
 parser.add_argument("--robot_model", type=str, default="alohamini1",
                     choices=["alohamini1", "alohamini2", "alohamini2pro"],
                     help="AlohaMini model. Must match the --robot_model used on the Pi host side.")
@@ -23,9 +22,9 @@ parser.add_argument("--robot_model", type=str, default="alohamini1",
 args = parser.parse_args()
 
 
-robot_config = LeKiwiClientConfig(remote_ip=args.remote_ip, id=args.robot_id,
-                                  robot_model=args.robot_model)
-robot = LeKiwiClient(robot_config)
+robot_config = AlohaMiniClientConfig(remote_ip=args.remote_ip, id=args.robot_id,
+                                     robot_model=args.robot_model)
+robot = AlohaMiniClient(robot_config)
 
 
 #dataset = LeRobotDataset("liyitenga/record_20250914225057", episodes=[EPISODE_IDX])

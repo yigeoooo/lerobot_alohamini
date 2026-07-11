@@ -14,6 +14,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .config_lekiwi import LeKiwiClientConfig, LeKiwiConfig
-from .lekiwi import LeKiwi
-from .lekiwi_client import LeKiwiClient
+from .alohamini import AlohaMini
+from .alohamini_client import AlohaMiniClient
+from .config_alohamini import (
+    AlohaMiniClientConfig,
+    AlohaMiniConfig,
+    AlohaMiniHostConfig,
+)
+
+__all__ = [
+    "AlohaMini",
+    "AlohaMiniClient",
+    "AlohaMiniClientConfig",
+    "AlohaMiniConfig",
+    "AlohaMiniHostConfig",
+]

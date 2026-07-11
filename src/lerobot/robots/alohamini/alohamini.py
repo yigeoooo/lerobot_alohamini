@@ -36,7 +36,7 @@ from lerobot.motors.feetech import (
 
 from ..robot import Robot
 from ..utils import ensure_safe_goal_position
-from .config_lekiwi import LeKiwiConfig
+from .config_alohamini import AlohaMiniConfig
 from .model_specs import arm_state_keys_for_robot_model, validate_robot_model
 
 logger = logging.getLogger(__name__)
@@ -99,7 +99,7 @@ def _make_arm_motors(
     }
 
 
-class LeKiwi(Robot):
+class AlohaMini(Robot):
     """
     The robot includes a three omniwheel mobile base and a remote follower arm.
     The leader arm is connected locally (on the laptop) and its joint positions are recorded and then
@@ -107,10 +107,10 @@ class LeKiwi(Robot):
     In parallel, keyboard teleoperation is used to generate raw velocity commands for the wheels.
     """
 
-    config_class = LeKiwiConfig
+    config_class = AlohaMiniConfig
     name = "alohamini"
 
-    def __init__(self, config: LeKiwiConfig):
+    def __init__(self, config: AlohaMiniConfig):
         super().__init__(config)
         self.config = config
         norm_mode_body = MotorNormMode.DEGREES if config.use_degrees else MotorNormMode.RANGE_M100_100
@@ -237,14 +237,19 @@ class LeKiwi(Robot):
         self.configure()
         logger.info(f"{self} connected.")
 
-        self.lift.home()
-        print("Lift axis homed to 0mm.")
+        if self.is_calibrated:
+            self.lift.home()
+            print("Lift axis homed to 0mm.")
+        else:
+            logger.info("Skipping lift homing because AlohaMini is not calibrated.")
 
         
 
     @property
     def is_calibrated(self) -> bool:
-        return self.left_bus.is_calibrated
+        return self.left_bus.is_calibrated and (
+            self.right_bus.is_calibrated if self.right_bus else True
+        )
 
     def calibrate(self) -> None:
         """
@@ -275,6 +280,25 @@ class LeKiwi(Robot):
                 return
 
         logger.info(f"\nRunning calibration of {self} (dual-bus if right_bus present)")
+
+        if self.config.no_follower:
+            logger.info("no_follower mode: writing default base/lift calibration.")
+            self.calibration = {}
+            for name, motor in self.left_bus.motors.items():
+                self.calibration[name] = MotorCalibration(
+                    id=motor.id,
+                    drive_mode=0,
+                    homing_offset=0,
+                    range_min=0,
+                    range_max=4095,
+                )
+
+            calib_left = {k: v for k, v in self.calibration.items() if k in self.left_bus.motors}
+            self.left_bus.write_calibration(calib_left, cache=False)
+            self.left_bus.calibration = calib_left
+            self._save_calibration()
+            print("Calibration saved to", self.calibration_fpath)
+            return
 
         if not getattr(self, "left_arm_motors", None):
             raise RuntimeError("left_arm_motors is empty; expected names starting with 'left_arm_'")

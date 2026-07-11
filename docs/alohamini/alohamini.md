@@ -16,7 +16,7 @@ Dual-arm setup — PC (client) + Raspberry Pi (host) on the same LAN.
 │  • Leader arms (USB)         │                   │  • Follower arms (USB)           │
 │  • teleoperate_bi.py         │                   │  • Base wheels + lift (USB)      │
 │  • record_bi.py              │                   │  • Cameras (USB)                 │
-│  • Training / Evaluation     │                   │  • lekiwi_host.py                │
+│  • Training / Evaluation     │                   │  • alohamini_host.py             │
 └──────────────────────────────┘                   └──────────────────────────────────┘
 ```
 
@@ -34,11 +34,11 @@ lerobot-find-port
 ls /dev/ttyACM*
 ```
 
-**Follower arms** — edit `src/lerobot/robots/alohamini/config_lekiwi.py` on the Pi:
+**Follower arms** — edit `src/lerobot/robots/alohamini/config_alohamini.py` on the Pi:
 
 ```python
 @dataclass
-class LeKiwiConfig(RobotConfig):
+class AlohaMiniConfig(RobotConfig):
     left_port:  str = "/dev/ttyACM0"   # replace with your left-bus port
     right_port: str = "/dev/ttyACM1"   # replace with your right-bus port
 ```
@@ -58,7 +58,7 @@ right_arm_config = SOLeaderConfig(port="/dev/ttyACM3", ...)   # replace
 lerobot-find-cameras
 ```
 
-Fill the detected index into `src/lerobot/robots/alohamini/config_lekiwi.py`.
+Fill the detected index into `src/lerobot/robots/alohamini/config_alohamini.py`.
 
 > Each camera requires its own USB port — do not share a USB hub between multiple cameras.
 
@@ -68,18 +68,20 @@ Fill the detected index into `src/lerobot/robots/alohamini/config_lekiwi.py`.
 
 ### Step 1 — Calibrate follower arms (Pi side)
 
-SSH into the Pi and run the host script for your model. On first run, the script prompts calibration: position each joint at its mechanical midpoint → Enter → rotate 90° left → Enter → rotate 90° right → Enter.
+SSH into the Pi and run the calibration script for your model: position each joint at its mechanical midpoint → Enter → rotate 90° left → Enter → rotate 90° right → Enter.
 
 ```bash
 # AlohaMini 1 (SO-ARM 5-DoF)
-python -m lerobot.robots.alohamini.lekiwi_host --robot_model alohamini1
+python -m lerobot.robots.alohamini.alohamini_calibrate --robot_model alohamini1
 
 # AlohaMini 2 (AM-ARM 6-DoF)
-python -m lerobot.robots.alohamini.lekiwi_host --robot_model alohamini2
+python -m lerobot.robots.alohamini.alohamini_calibrate --robot_model alohamini2
 
 # AlohaMini 2 Pro (AM-ARM 6-DoF, STS3250)
-python -m lerobot.robots.alohamini.lekiwi_host --robot_model alohamini2pro
+python -m lerobot.robots.alohamini.alohamini_calibrate --robot_model alohamini2pro
 ```
+
+Starting the host also checks calibration and will prompt this flow automatically if calibration is missing.
 
 SO-ARM 5-DoF reference middle position:
 
@@ -119,9 +121,9 @@ Start the Pi host first, then the PC client (calibration is skipped since it's a
 
 ```bash
 # Pi — run the host for your robot:
-python -m lerobot.robots.alohamini.lekiwi_host --robot_model alohamini1
-python -m lerobot.robots.alohamini.lekiwi_host --robot_model alohamini2
-python -m lerobot.robots.alohamini.lekiwi_host --robot_model alohamini2pro
+python -m lerobot.robots.alohamini.alohamini_host --robot_model alohamini1
+python -m lerobot.robots.alohamini.alohamini_host --robot_model alohamini2
+python -m lerobot.robots.alohamini.alohamini_host --robot_model alohamini2pro
 
 # PC — run the client for your leader arm:
 python examples/alohamini/teleoperate_bi.py \

@@ -5,8 +5,7 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.utils.constants import HF_LEROBOT_HOME
 from lerobot.utils.feature_utils import hw_to_dataset_features
 from lerobot.processor import make_default_processors
-from lerobot.robots.alohamini.config_lekiwi import LeKiwiClientConfig
-from lerobot.robots.alohamini.lekiwi_client import LeKiwiClient
+from lerobot.robots.alohamini import AlohaMiniClient, AlohaMiniClientConfig
 from lerobot.scripts.lerobot_record import record_loop
 from lerobot.teleoperators.keyboard import KeyboardTeleop, KeyboardTeleopConfig
 from lerobot.teleoperators.bi_so_leader import BiSOLeader, BiSOLeaderConfig
@@ -42,7 +41,7 @@ def main():
     parser.add_argument("--reset_time", type=int, default=10, help="Reset duration between episodes (seconds)")
     parser.add_argument("--task_description", type=str, default="My task description4", help="Task description")
     parser.add_argument("--remote_ip", type=str, default="127.0.0.1", help="Robot host IP")
-    parser.add_argument("--robot_id", type=str, default="lekiwi_host", help="Robot ID")
+    parser.add_argument("--robot_id", type=str, default="my_alohamini", help="Robot ID")
     parser.add_argument(
         "--robot_model",
         type=str,
@@ -71,7 +70,7 @@ def main():
     args = parser.parse_args()
 
     # === Robot and teleop config ===
-    robot_config = LeKiwiClientConfig(
+    robot_config = AlohaMiniClientConfig(
         remote_ip=args.remote_ip,
         id=args.robot_id,
         robot_model=args.robot_model,
@@ -89,7 +88,7 @@ def main():
     )
     keyboard_config = KeyboardTeleopConfig()
 
-    robot = LeKiwiClient(robot_config)
+    robot = AlohaMiniClient(robot_config)
     leader_arm = BiSOLeader(leader_arm_config)
     keyboard = KeyboardTeleop(keyboard_config)
 
@@ -126,7 +125,7 @@ def main():
     keyboard.connect()
 
     listener, events = init_keyboard_listener()
-    init_rerun(session_name="lekiwi_record")
+    init_rerun(session_name="alohamini_record")
 
     if not robot.is_connected or not leader_arm.is_connected or not keyboard.is_connected:
         raise ValueError("Robot or teleop is not connected!")
