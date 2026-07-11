@@ -179,11 +179,21 @@ class AlohaMini(Robot):
         self._overcurrent_count: dict[str, int] = {}
         self._overcurrent_trip_n = 20
         self._last_currents_log_t = 0.0
-        self._gripper_current_limit_ma = 150.0
-        self._gripper_current_hysteresis_ma = 5.0
-        self._gripper_retreat_step = 2.0
-        self._gripper_relief_direction: dict[str, float] = {}
-        self._last_gripper_limit_log_t = 0.0
+        self._gripper_current_limit_ma = 500.0
+        # Nudge the held position slightly further closed than present, so the gripper
+        # keeps a bit of squeeze (a small resting current) instead of fully relaxing to 0mA.
+        self._gripper_hold_close_step = 3
+        # How far the caller's own goal must move past the held position, in the open
+        # direction, before we treat it as "the user wants to open" and let go.
+        self._gripper_release_margin = 1.0
+        # Fixed by mechanical installation, not measured at runtime: +1.0 means increasing
+        # raw position opens the gripper. Flip a motor's sign here if it holds/releases
+        # the wrong way.
+        self._gripper_open_direction: dict[str, float] = {
+            "arm_left_gripper": 1.0,
+            "arm_right_gripper": 1.0,
+        }
+        self._gripper_hold_goal: dict[str, float] = {}
 
 
     @property
@@ -700,7 +710,7 @@ class AlohaMini(Robot):
         return {**left_pos, **right_pos, **base_goal_vel, **lift_sent}
 
     def _limit_gripper_goal_by_current(self, bus, goal_pos: dict[str, float]) -> dict[str, float]:
-        """Back off a gripper until measured current falls back near the force limit."""
+        """Stop pushing a gripper harder once its measured current exceeds the force limit."""
         gripper_goal_keys = [
             key for key in goal_pos if key.endswith("_gripper.pos") and key.replace(".pos", "") in bus.motors
         ]
@@ -716,41 +726,48 @@ class AlohaMini(Robot):
             return goal_pos
 
         limited_goal_pos = dict(goal_pos)
-        now = time.monotonic()
-        release_current_ma = max(0.0, self._gripper_current_limit_ma - self._gripper_current_hysteresis_ma)
         for goal_key in gripper_goal_keys:
             motor = goal_key.replace(".pos", "")
             goal = float(limited_goal_pos[goal_key])
             present = float(present_pos[motor])
             current_ma = abs(float(currents_raw.get(motor, 0.0)) * 6.5)
+            open_direction = self._gripper_open_direction.get(motor, 1.0)
 
-            if current_ma >= self._gripper_current_limit_ma:
-                command_delta = goal - present
-                if abs(command_delta) > 1e-6:
-                    self._gripper_relief_direction[motor] = -1.0 if command_delta > 0 else 1.0
-
-            relief_direction = self._gripper_relief_direction.get(motor)
-            if relief_direction is None:
-                continue
-
-            if current_ma <= release_current_ma:
-                self._gripper_relief_direction.pop(motor, None)
-                limited_goal_pos[goal_key] = present
-                continue
-
-            limited_goal_pos[goal_key] = min(
-                100.0,
-                max(0.0, present + relief_direction * self._gripper_retreat_step),
-            )
-            if now - self._last_gripper_limit_log_t >= 1.0:
-                logger.warning(
-                    "Gripper current limit: %s %.1f mA >= %.1f mA; backing off to %.2f.",
-                    motor,
-                    current_ma,
-                    self._gripper_current_limit_ma,
-                    limited_goal_pos[goal_key],
+            if motor not in self._gripper_hold_goal:
+                if current_ma < self._gripper_current_limit_ma:
+                    continue
+                # Entering a new contact episode: pin the goal near the present position so
+                # the PID stops fighting to close further -- that alone is what drops the
+                # current, since it's the position error collapsing, not a meaningful
+                # mechanical retreat. Nudge it a small step further *closed* (not present
+                # exactly) so a little position error -- and thus a little squeeze current
+                # -- remains, instead of fully relaxing to 0mA.
+                hold_goal = min(
+                    100.0, max(0.0, present - open_direction * self._gripper_hold_close_step)
                 )
-                self._last_gripper_limit_log_t = now
+                self._gripper_hold_goal[motor] = hold_goal
+                print(
+                    f"[GripperCurrentLimit] {motor}: {current_ma:.1f} mA >= "
+                    f"{self._gripper_current_limit_ma:.1f} mA; holding at position {hold_goal:.2f} "
+                    f"(present={present:.2f})"
+                )
+
+            hold_goal = self._gripper_hold_goal[motor]
+
+            # Only hand control back once the caller's own goal asks to open past where
+            # we're holding. Current alone can't signal "let go": pinning the goal at
+            # present already drops the current toward ~0 regardless of whether the
+            # object is still in contact, so a low reading doesn't mean it's safe to
+            # resume closing -- only the caller explicitly asking to open does.
+            if (goal - hold_goal) * open_direction >= self._gripper_release_margin:
+                self._gripper_hold_goal.pop(motor, None)
+                print(
+                    f"[GripperCurrentLimit] {motor}: goal {goal:.2f} past held position "
+                    f"{hold_goal:.2f}; releasing hold."
+                )
+                continue
+
+            limited_goal_pos[goal_key] = hold_goal
 
         return limited_goal_pos
 
