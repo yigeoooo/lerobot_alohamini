@@ -139,7 +139,9 @@ class AlohaMiniClient(Robot):
         self.zmq_observation_socket = self.zmq_context.socket(zmq.PULL)
         zmq_observations_locator = f"tcp://{self.remote_ip}:{self.port_zmq_observations}"
         self.zmq_observation_socket.connect(zmq_observations_locator)
-        self.zmq_observation_socket.setsockopt(zmq.CONFLATE, 1)
+        # Multipart messages cannot use CONFLATE safely. Keep the queue tiny and drain it to the
+        # newest complete observation in _poll_and_get_latest_message().
+        self.zmq_observation_socket.setsockopt(zmq.RCVHWM, 1)
 
         poller = zmq.Poller()
         poller.register(self.zmq_observation_socket, zmq.POLLIN)
@@ -152,8 +154,8 @@ class AlohaMiniClient(Robot):
     def calibrate(self) -> None:
         pass
 
-    def _poll_and_get_latest_message(self) -> str | None:
-        """Polls the ZMQ socket for a limited time and returns the latest message string."""
+    def _poll_and_get_latest_message(self) -> list[bytes] | None:
+        """Polls the ZMQ socket for a limited time and returns the latest multipart message."""
         zmq = self._zmq
         poller = zmq.Poller()
         poller.register(self.zmq_observation_socket, zmq.POLLIN)
@@ -171,7 +173,7 @@ class AlohaMiniClient(Robot):
         last_msg = None
         while True:
             try:
-                msg = self.zmq_observation_socket.recv_string(zmq.NOBLOCK)
+                msg = self.zmq_observation_socket.recv_multipart(zmq.NOBLOCK)
                 last_msg = msg
             except zmq.Again:
                 break
@@ -181,11 +183,13 @@ class AlohaMiniClient(Robot):
 
         return last_msg
 
-    def _parse_observation_json(self, obs_string: str) -> RobotObservation | None:
-        """Parses the JSON observation string."""
+    def _parse_observation_json(self, obs_data: str | bytes) -> RobotObservation | None:
+        """Parses the JSON observation metadata."""
         try:
-            return json.loads(obs_string)
-        except json.JSONDecodeError as e:
+            if isinstance(obs_data, bytes):
+                obs_data = obs_data.decode("utf-8")
+            return json.loads(obs_data)
+        except (UnicodeDecodeError, json.JSONDecodeError) as e:
             logging.error(f"Error decoding JSON observation: {e}")
             return None
 
@@ -204,8 +208,54 @@ class AlohaMiniClient(Robot):
             logging.error(f"Error decoding base64 image data: {e}")
             return None
 
+    def _decode_image_from_jpeg_bytes(self, jpg_data: bytes) -> np.ndarray | None:
+        """Decodes JPEG bytes from a ZMQ multipart frame to an OpenCV image."""
+        if not jpg_data:
+            return None
+        frame = cv2.imdecode(np.frombuffer(jpg_data, np.uint8), cv2.IMREAD_COLOR)
+        if frame is None:
+            logging.warning("cv2.imdecode returned None for JPEG bytes.")
+        return frame
+
+    def _parse_observation_message(
+        self, message_parts: list[bytes]
+    ) -> tuple[RobotObservation, dict[str, np.ndarray]] | None:
+        """Parse either the new multipart JPEG protocol or the legacy base64 JSON protocol."""
+        if not message_parts:
+            return None
+
+        observation = self._parse_observation_json(message_parts[0])
+        if observation is None:
+            return None
+
+        encoded_frames: dict[str, np.ndarray] = {}
+        if len(message_parts) == 1:
+            # Backward compatibility with the previous JSON/base64 protocol.
+            for cam_name, image_b64 in observation.items():
+                if cam_name not in self._cameras_ft:
+                    continue
+                frame = self._decode_image_from_b64(image_b64)
+                if frame is not None:
+                    encoded_frames[cam_name] = frame
+        else:
+            if (len(message_parts) - 1) % 2 != 0:
+                logging.warning("Invalid multipart observation: expected camera/JPEG pairs.")
+            for index in range(1, len(message_parts) - 1, 2):
+                try:
+                    cam_name = message_parts[index].decode("utf-8")
+                except UnicodeDecodeError:
+                    logging.warning("Invalid camera name in multipart observation.")
+                    continue
+                if cam_name not in self._cameras_ft:
+                    continue
+                frame = self._decode_image_from_jpeg_bytes(message_parts[index + 1])
+                if frame is not None:
+                    encoded_frames[cam_name] = frame
+
+        return observation, encoded_frames
+
     def _remote_state_from_obs(
-        self, observation: RobotObservation
+        self, observation: RobotObservation, encoded_frames: dict[str, np.ndarray]
     ) -> tuple[dict[str, np.ndarray], RobotObservation]:
         """Extracts frames, and state from the parsed observation."""
 
@@ -220,16 +270,7 @@ class AlohaMiniClient(Robot):
         
         #logging.warning("obs_dict: %s", obs_dict)
 
-        # Decode images
-        current_frames: dict[str, np.ndarray] = {}
-        for cam_name, image_b64 in observation.items():
-            if cam_name not in self._cameras_ft:
-                continue
-            frame = self._decode_image_from_b64(image_b64)
-            if frame is not None:
-                current_frames[cam_name] = frame
-
-        return current_frames, obs_dict
+        return encoded_frames, obs_dict
 
     def _get_data(self) -> tuple[dict[str, np.ndarray], RobotObservation]:
         """
@@ -240,33 +281,30 @@ class AlohaMiniClient(Robot):
         If no new data arrives or decoding fails, returns the last known values.
         """
 
-        # 1. Get the latest message string from the socket
-        latest_message_str = self._poll_and_get_latest_message()
+        # 1. Get the latest message from the socket
+        latest_message_parts = self._poll_and_get_latest_message()
 
         # 2. If no message, return cached data
-        if latest_message_str is None:
+        if latest_message_parts is None:
             return self.last_frames, self.last_remote_state
 
-        # 3. Parse the JSON message
-        observation = self._parse_observation_json(latest_message_str)
-
-        
-
-        # 4. If JSON parsing failed, return cached data
-        if observation is None:
+        # 3. Parse the observation message
+        parsed = self._parse_observation_message(latest_message_parts)
+        if parsed is None:
             return self.last_frames, self.last_remote_state
+        observation, encoded_frames = parsed
 
-        # 5. Process the valid observation data
+        # 4. Process the valid observation data
         try:
-            new_frames, new_state = self._remote_state_from_obs(observation)
+            new_frames, new_state = self._remote_state_from_obs(observation, encoded_frames)
         except Exception as e:
             logging.error(f"Error processing observation data, serving last observation: {e}")
             return self.last_frames, self.last_remote_state
 
-        self.last_frames = new_frames
+        self.last_frames = {**self.last_frames, **new_frames}
         self.last_remote_state = new_state
 
-        return new_frames, new_state
+        return self.last_frames, new_state
 
     @check_if_not_connected
     def get_observation(self) -> RobotObservation:
@@ -277,11 +315,12 @@ class AlohaMiniClient(Robot):
         """
         frames, obs_dict = self._get_data()
 
-        # Loop over each configured camera
-        for cam_name, frame in frames.items():
+        # Always return every configured camera key. Dataset feature construction expects a stable
+        # observation schema even if a frame is dropped or a camera has not produced data yet.
+        for cam_name, (height, width, channels) in self._cameras_ft.items():
+            frame = frames.get(cam_name)
             if frame is None:
-                logging.warning("Frame is None")
-                height, width, channels = self._cameras_ft[cam_name]
+                logging.warning("Frame is None for %s; using zeros.", cam_name)
                 frame = np.zeros((height, width, channels), dtype=np.uint8)
             obs_dict[cam_name] = frame
 

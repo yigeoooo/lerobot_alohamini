@@ -5,8 +5,7 @@ Shared software layer for the AlohaMini product line, built on HuggingFace LeRob
 > Haven't assembled your hardware yet? Start here: [AlohaMini](https://github.com/liyiteng/alohamini) · [AM-ARM200](https://github.com/liyiteng/AM-ARM)
 
 ## Updates
-- **[2025-05-21]** Add support for AM-ARM200 and AlohaMini 2 / 2 Pro
-- **[2025-04-10]** Compatible with LeRobot 0.5.2
+- **[2025-07-11]** merge upstream LeRobot v0.6
 
 ## Documentation
 

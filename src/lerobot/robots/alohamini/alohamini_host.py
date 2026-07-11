@@ -14,12 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import base64
 import argparse
 import json
 import logging
 import time
-import sys
 
 import cv2
 import zmq
@@ -36,7 +34,9 @@ class AlohaMiniHost:
         self.zmq_cmd_socket.bind(f"tcp://*:{config.port_zmq_cmd}")
 
         self.zmq_observation_socket = self.zmq_context.socket(zmq.PUSH)
-        self.zmq_observation_socket.setsockopt(zmq.CONFLATE, 1)
+        # CONFLATE does not work reliably with multipart messages. Keep the queue tiny and let
+        # the client drain to the newest complete observation instead.
+        self.zmq_observation_socket.setsockopt(zmq.SNDHWM, 1)
         self.zmq_observation_socket.bind(f"tcp://*:{config.port_zmq_observations}")
 
         self.connection_time_s = config.connection_time_s
@@ -48,6 +48,41 @@ class AlohaMiniHost:
         self.zmq_cmd_socket.close()
         self.zmq_context.term()
  
+
+def _jsonable(value):
+    """Convert numpy scalars to JSON-native values without touching normal Python values."""
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except ValueError:
+            pass
+    return value
+
+
+def build_observation_multipart(observation: dict, camera_keys) -> list[bytes]:
+    """Encode state as JSON and camera images as binary JPEG multipart frames."""
+    state_observation = {
+        key: _jsonable(value) for key, value in observation.items() if key not in camera_keys
+    }
+    state_observation["_image_encoding"] = "jpeg"
+
+    parts = [json.dumps(state_observation).encode("utf-8")]
+    image_names = []
+    for cam_key in camera_keys:
+        frame = observation.get(cam_key)
+        if frame is None:
+            continue
+        ret, buffer = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+        if not ret:
+            logging.warning("Failed to JPEG encode camera frame %s.", cam_key)
+            continue
+        image_names.append(cam_key)
+        parts.extend([cam_key.encode("utf-8"), buffer.tobytes()])
+
+    state_observation["_images"] = image_names
+    parts[0] = json.dumps(state_observation).encode("utf-8")
+    return parts
+
 
 def main():
     parser = argparse.ArgumentParser(description="Run AlohaMini host process")
@@ -126,19 +161,11 @@ def main():
             
             last_observation = robot.get_observation()
 
-            # Encode ndarrays to base64 strings
-            for cam_key, _ in robot.cameras.items():
-                ret, buffer = cv2.imencode(
-                    ".jpg", last_observation[cam_key], [int(cv2.IMWRITE_JPEG_QUALITY), 90]
-                )
-                if ret:
-                    last_observation[cam_key] = base64.b64encode(buffer).decode("utf-8")
-                else:
-                    last_observation[cam_key] = ""
+            observation_parts = build_observation_multipart(last_observation, robot.cameras.keys())
 
             # Send the observation to the remote agent
             try:
-                host.zmq_observation_socket.send_string(json.dumps(last_observation), flags=zmq.NOBLOCK)
+                host.zmq_observation_socket.send_multipart(observation_parts, flags=zmq.NOBLOCK)
             except zmq.Again:
                 logging.info("Dropping observation, no client connected")
 
