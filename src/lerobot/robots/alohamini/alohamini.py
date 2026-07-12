@@ -194,6 +194,19 @@ class AlohaMini(Robot):
             "arm_right_gripper": 1.0,
         }
         self._gripper_hold_goal: dict[str, float] = {}
+        self._gripper_hold_direction: dict[str, float] = {}
+
+        # Same idea as the gripper protection above, applied to the rest of the arm
+        # joints (shoulder/elbow/wrist, in degrees). Unlike the gripper there's no fixed
+        # "open direction" -- a joint can be pushed into an obstacle from either side
+        # depending on the motion, so the retreat direction is inferred per contact
+        # episode instead of configured. And unlike the gripper, we don't want to keep
+        # nudging force into whatever it hit -- this is collision protection, not grip
+        # force, so it just freezes at the held position.
+        self._joint_current_limit_ma = 1800.0
+        self._joint_release_margin = 1.0
+        self._joint_hold_goal: dict[str, float] = {}
+        self._joint_hold_direction: dict[str, float] = {}
 
 
     @property
@@ -688,8 +701,10 @@ class AlohaMini(Robot):
             right_pos = ensure_safe_goal_position(gp_right, self.config.max_relative_target)
 
         left_pos = self._limit_gripper_goal_by_current(self.left_bus, left_pos)
+        left_pos = self._limit_joint_goal_by_current(self.left_bus, left_pos)
         if self.right_bus and right_pos:
             right_pos = self._limit_gripper_goal_by_current(self.right_bus, right_pos)
+            right_pos = self._limit_joint_goal_by_current(self.right_bus, right_pos)
 
         # Send goal position to the actuators
         # arm_goal_pos_raw = {k.replace(".pos", ""): v for k, v in arm_goal_pos.items()}
@@ -711,59 +726,109 @@ class AlohaMini(Robot):
 
     def _limit_gripper_goal_by_current(self, bus, goal_pos: dict[str, float]) -> dict[str, float]:
         """Stop pushing a gripper harder once its measured current exceeds the force limit."""
-        gripper_goal_keys = [
-            key for key in goal_pos if key.endswith("_gripper.pos") and key.replace(".pos", "") in bus.motors
-        ]
-        if not gripper_goal_keys:
+        return self._limit_goal_by_current(
+            bus,
+            goal_pos,
+            is_target_motor=lambda key: key.endswith("_gripper.pos"),
+            current_limit_ma=self._gripper_current_limit_ma,
+            release_margin=self._gripper_release_margin,
+            hold_goal_state=self._gripper_hold_goal,
+            hold_direction_state=self._gripper_hold_direction,
+            fixed_direction=self._gripper_open_direction,
+            hold_close_step=self._gripper_hold_close_step,
+            log_tag="GripperCurrentLimit",
+        )
+
+    def _limit_joint_goal_by_current(self, bus, goal_pos: dict[str, float]) -> dict[str, float]:
+        """Freeze an arm joint (not the gripper) once its measured current exceeds the limit."""
+        return self._limit_goal_by_current(
+            bus,
+            goal_pos,
+            is_target_motor=lambda key: not key.endswith("_gripper.pos"),
+            current_limit_ma=self._joint_current_limit_ma,
+            release_margin=self._joint_release_margin,
+            hold_goal_state=self._joint_hold_goal,
+            hold_direction_state=self._joint_hold_direction,
+            fixed_direction=None,
+            hold_close_step=0.0,
+            log_tag="JointCurrentLimit",
+        )
+
+    def _limit_goal_by_current(
+        self,
+        bus,
+        goal_pos: dict[str, float],
+        *,
+        is_target_motor,
+        current_limit_ma: float,
+        release_margin: float,
+        hold_goal_state: dict[str, float],
+        hold_direction_state: dict[str, float],
+        fixed_direction: dict[str, float] | None,
+        hold_close_step: float,
+        log_tag: str,
+    ) -> dict[str, float]:
+        """Freeze a motor's goal once its current exceeds the limit, holding there until the
+        caller's own goal asks to move back past the held position.
+
+        fixed_direction is a per-motor mechanical constant (e.g. the gripper's open/close
+        sense, fixed at install time). Pass None for joints that can be pushed into an
+        obstacle from either side -- the retreat direction is then inferred per contact
+        episode from which way the caller was commanding it to move.
+        """
+        target_keys = [key for key in goal_pos if is_target_motor(key) and key.replace(".pos", "") in bus.motors]
+        if not target_keys:
             return goal_pos
 
-        gripper_motors = [key.replace(".pos", "") for key in gripper_goal_keys]
+        target_motors = [key.replace(".pos", "") for key in target_keys]
         try:
-            currents_raw = bus.sync_read("Present_Current", gripper_motors)
-            present_pos = bus.sync_read("Present_Position", gripper_motors)
+            currents_raw = bus.sync_read("Present_Current", target_motors)
+            present_pos = bus.sync_read("Present_Position", target_motors)
         except Exception as e:
-            logger.warning("Failed to read gripper current/position for force limiting: %s", e)
+            logger.warning("Failed to read %s current/position for force limiting: %s", log_tag, e)
             return goal_pos
 
         limited_goal_pos = dict(goal_pos)
-        for goal_key in gripper_goal_keys:
+        for goal_key in target_keys:
             motor = goal_key.replace(".pos", "")
             goal = float(limited_goal_pos[goal_key])
             present = float(present_pos[motor])
             current_ma = abs(float(currents_raw.get(motor, 0.0)) * 6.5)
-            open_direction = self._gripper_open_direction.get(motor, 1.0)
 
-            if motor not in self._gripper_hold_goal:
-                if current_ma < self._gripper_current_limit_ma:
+            if motor not in hold_goal_state:
+                if current_ma < current_limit_ma:
                     continue
-                # Entering a new contact episode: pin the goal near the present position so
-                # the PID stops fighting to close further -- that alone is what drops the
-                # current, since it's the position error collapsing, not a meaningful
-                # mechanical retreat. Nudge it a small step further *closed* (not present
-                # exactly) so a little position error -- and thus a little squeeze current
-                # -- remains, instead of fully relaxing to 0mA.
-                hold_goal = min(
-                    100.0, max(0.0, present - open_direction * self._gripper_hold_close_step)
-                )
-                self._gripper_hold_goal[motor] = hold_goal
+                if fixed_direction is not None:
+                    # Nudge a small step further in the "closing" sense so a bit of
+                    # position error -- and thus a bit of squeeze current -- remains,
+                    # instead of fully relaxing to 0mA.
+                    direction = fixed_direction.get(motor, 1.0)
+                    hold_goal = min(100.0, max(0.0, present - direction * hold_close_step))
+                else:
+                    # No fixed mechanical sense: infer which way it was being pushed and
+                    # hold back away from that direction instead.
+                    command_delta = goal - present
+                    direction = -1.0 if command_delta > 0 else 1.0
+                    hold_goal = present
+                hold_goal_state[motor] = hold_goal
+                hold_direction_state[motor] = direction
                 print(
-                    f"[GripperCurrentLimit] {motor}: {current_ma:.1f} mA >= "
-                    f"{self._gripper_current_limit_ma:.1f} mA; holding at position {hold_goal:.2f} "
-                    f"(present={present:.2f})"
+                    f"[{log_tag}] {motor}: {current_ma:.1f} mA >= {current_limit_ma:.1f} mA; "
+                    f"holding at position {hold_goal:.2f} (present={present:.2f})"
                 )
 
-            hold_goal = self._gripper_hold_goal[motor]
+            hold_goal = hold_goal_state[motor]
+            direction = hold_direction_state[motor]
 
-            # Only hand control back once the caller's own goal asks to open past where
-            # we're holding. Current alone can't signal "let go": pinning the goal at
-            # present already drops the current toward ~0 regardless of whether the
-            # object is still in contact, so a low reading doesn't mean it's safe to
-            # resume closing -- only the caller explicitly asking to open does.
-            if (goal - hold_goal) * open_direction >= self._gripper_release_margin:
-                self._gripper_hold_goal.pop(motor, None)
+            # Only hand control back once the caller's own goal asks to move past where
+            # we're holding, in the direction away from what triggered the hold. Current
+            # alone can't signal "let go": holding at/near present already drops the
+            # current toward ~0 regardless of whether the object/obstacle is still there.
+            if (goal - hold_goal) * direction >= release_margin:
+                hold_goal_state.pop(motor, None)
+                hold_direction_state.pop(motor, None)
                 print(
-                    f"[GripperCurrentLimit] {motor}: goal {goal:.2f} past held position "
-                    f"{hold_goal:.2f}; releasing hold."
+                    f"[{log_tag}] {motor}: goal {goal:.2f} past held position {hold_goal:.2f}; releasing hold."
                 )
                 continue
 
