@@ -13,7 +13,7 @@ from lerobot.teleoperators.so_leader import SOLeaderConfig
 from lerobot.utils.constants import ACTION, HF_LEROBOT_HOME, OBS_STR
 from lerobot.utils.feature_utils import hw_to_dataset_features
 from lerobot.utils.keyboard_input import init_keyboard_listener
-from lerobot.utils.utils import log_say
+from lerobot.utils.utils import init_logging, log_say
 from lerobot.utils.visualization_utils import init_rerun
 
 
@@ -30,6 +30,7 @@ def parse_bool(value: str | bool) -> bool:
 
 
 def main():
+    init_logging()
     parser = argparse.ArgumentParser(description="Record episodes with bi-arm teleoperation")
     parser.add_argument("--dataset.repo_id", "--dataset", dest="dataset_repo_id", type=str, required=True,
                     help="Dataset repo_id, e.g. liyitenga/record_20250914225057")
