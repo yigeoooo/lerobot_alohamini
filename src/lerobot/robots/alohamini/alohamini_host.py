@@ -33,12 +33,12 @@ class AlohaMiniHost:
         self.zmq_cmd_socket.setsockopt(zmq.CONFLATE, 1)
         self.zmq_cmd_socket.bind(f"tcp://*:{config.port_zmq_cmd}")
 
-        # Observations are request-driven: the client asks for a frame and the host
-        # replies with the current one. This prevents frames from accumulating while
-        # the client is busy encoding/saving a dataset episode.
+        # Observations are request-driven with a small bounded request window. The Host
+        # consumes at most one credit per control loop, preventing unbounded accumulation
+        # while allowing transport latency to overlap subsequent observation cycles.
         self.zmq_observation_socket = self.zmq_context.socket(zmq.ROUTER)
-        self.zmq_observation_socket.setsockopt(zmq.SNDHWM, 1)
-        self.zmq_observation_socket.setsockopt(zmq.RCVHWM, 1)
+        self.zmq_observation_socket.setsockopt(zmq.SNDHWM, config.observation_request_window)
+        self.zmq_observation_socket.setsockopt(zmq.RCVHWM, config.observation_request_window)
         self.zmq_observation_socket.bind(f"tcp://*:{config.port_zmq_observations}")
 
         self.connection_time_s = config.connection_time_s
@@ -86,6 +86,18 @@ def build_observation_multipart(observation: dict, camera_keys) -> list[bytes]:
     return parts
 
 
+def parse_bool(value: str | bool) -> bool:
+    if isinstance(value, bool):
+        return value
+
+    value = value.lower()
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    raise argparse.ArgumentTypeError("Expected true or false.")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run AlohaMini host process")
     parser.add_argument(
@@ -108,6 +120,18 @@ def main():
         "--no_follower",
         action="store_true",
         help="Do not connect follower arms, only operate the base and lift. Use together with --no_leader on the teleoperate side.",
+    )
+    parser.add_argument(
+        "--profile_timing",
+        "--profile-timing",
+        type=parse_bool,
+        nargs="?",
+        const=True,
+        default=False,
+        help=(
+            "Print average Host, motor, camera, JPEG, and network timings once per second "
+            "(default: false)."
+        ),
     )
     args = parser.parse_args()
 
@@ -136,14 +160,21 @@ def main():
         # Business logic
         start = time.perf_counter()
         duration = 0
+        timing_report_start_t = start
+        timing_loop_count = 0
+        timing_totals_ms: dict[str, float] = {}
+        timing_command_count = 0
+        action_timing_totals_ms: dict[str, float] = {}
 
         while duration < host.connection_time_s:
-            loop_start_time = time.time()
+            loop_start_t = time.perf_counter()
+            command_received = False
             try:
                 msg = host.zmq_cmd_socket.recv_string(zmq.NOBLOCK)
                 data = dict(json.loads(msg))
                 #print(f"Received action: {data}")   # debug 
                 _action_sent = robot.send_action(data)
+                command_received = True
                 
                 last_cmd_time = time.time()
                 watchdog_active = False
@@ -151,6 +182,7 @@ def main():
                 pass
             except Exception as e:
                 logging.exception("Message fetching failed: %s", e)
+            command_done_t = time.perf_counter()
 
             now = time.time()
             if (now - last_cmd_time > host.watchdog_timeout_ms / 1000) and not watchdog_active:
@@ -162,33 +194,103 @@ def main():
 
             
             last_observation = robot.get_observation()
+            observation_done_t = time.perf_counter()
 
-            # Drain duplicate requests and answer only the latest one. Since the
-            # response is built after receiving the request, it cannot come from a
-            # queue accumulated while the client was saving.
+            # Consume at most one request credit per Host loop. Draining all pending
+            # requests here would collapse the client's sliding window back into
+            # stop-and-wait behavior because the discarded tokens never receive replies.
             request_identity = None
             request_token = None
             try:
-                while True:
-                    request_parts = host.zmq_observation_socket.recv_multipart(flags=zmq.NOBLOCK)
-                    request_identity = request_parts[0]
-                    request_token = request_parts[-1]
+                request_parts = host.zmq_observation_socket.recv_multipart(flags=zmq.NOBLOCK)
+                request_identity = request_parts[0]
+                request_token = request_parts[-1]
             except zmq.Again:
                 pass
+            request_poll_done_t = time.perf_counter()
 
+            encode_done_t = request_poll_done_t
             if request_identity is not None and request_token is not None:
                 observation_parts = build_observation_multipart(last_observation, robot.cameras.keys())
+                encode_done_t = time.perf_counter()
                 try:
                     host.zmq_observation_socket.send_multipart(
                         [request_identity, request_token, *observation_parts], flags=zmq.NOBLOCK
                     )
                 except zmq.Again:
                     logging.info("Dropping observation response, client is not ready")
+            response_send_done_t = time.perf_counter()
 
             # Ensure a short sleep to avoid overloading the CPU.
-            elapsed = time.time() - loop_start_time
+            elapsed = response_send_done_t - loop_start_t
 
             time.sleep(max(1 / host.max_loop_freq_hz - elapsed, 0))
+            loop_done_t = time.perf_counter()
+
+            loop_timings_ms = {
+                "command": (command_done_t - loop_start_t) * 1e3,
+                "robot_observation": (observation_done_t - command_done_t) * 1e3,
+                "request_poll": (request_poll_done_t - observation_done_t) * 1e3,
+                "jpeg_encode": (encode_done_t - request_poll_done_t) * 1e3,
+                "response_send": (response_send_done_t - encode_done_t) * 1e3,
+                "sleep": (loop_done_t - response_send_done_t) * 1e3,
+                "loop": (loop_done_t - loop_start_t) * 1e3,
+                **robot.logs.get("observation_timing_ms", {}),
+            }
+            for name, value_ms in loop_timings_ms.items():
+                timing_totals_ms[name] = timing_totals_ms.get(name, 0.0) + value_ms
+            timing_loop_count += 1
+            if command_received:
+                for name, value_ms in robot.logs.get("action_timing_ms", {}).items():
+                    action_timing_totals_ms[name] = action_timing_totals_ms.get(name, 0.0) + value_ms
+                timing_command_count += 1
+
+            timing_elapsed_s = loop_done_t - timing_report_start_t
+            if args.profile_timing and timing_elapsed_s >= 1.0:
+                averages = {
+                    name: total_ms / timing_loop_count for name, total_ms in timing_totals_ms.items()
+                }
+                camera_text = " ".join(
+                    f"{name}={value:.1f}"
+                    for name, value in averages.items()
+                    if name.startswith("camera_")
+                )
+                print(
+                    f"[HOST TIMING avg ms/loop] Hz={timing_loop_count / timing_elapsed_s:.1f} "
+                    f"cmd={averages['command']:.1f} robot_obs={averages['robot_observation']:.1f} "
+                    f"left={averages.get('left_arm', 0.0):.1f} base={averages.get('base', 0.0):.1f} "
+                    f"right={averages.get('right_arm', 0.0):.1f} lift={averages.get('lift', 0.0):.1f} "
+                    f"currents={averages.get('currents', 0.0):.1f} {camera_text} "
+                    f"jpeg={averages['jpeg_encode']:.1f} send={averages['response_send']:.1f} "
+                    f"sleep={averages['sleep']:.1f} loop={averages['loop']:.1f}",
+                    flush=True,
+                )
+                if timing_command_count:
+                    action_averages = {
+                        name: total_ms / timing_command_count
+                        for name, total_ms in action_timing_totals_ms.items()
+                    }
+                    print(
+                        f"[HOST ACTION avg ms/command] n={timing_command_count} "
+                        f"prepare={action_averages.get('action_prepare', 0.0):.1f} "
+                        f"lift={action_averages.get('action_lift', 0.0):.1f} "
+                        f"relative={action_averages.get('action_relative_limit', 0.0):.1f} "
+                        f"left_gripper_limit={action_averages.get('action_left_gripper_limit', 0.0):.1f} "
+                        f"left_joint_limit={action_averages.get('action_left_joint_limit', 0.0):.1f} "
+                        f"right_gripper_limit={action_averages.get('action_right_gripper_limit', 0.0):.1f} "
+                        f"right_joint_limit={action_averages.get('action_right_joint_limit', 0.0):.1f} "
+                        f"left_write={action_averages.get('action_left_write', 0.0):.1f} "
+                        f"right_write={action_averages.get('action_right_write', 0.0):.1f} "
+                        f"base_write={action_averages.get('action_base_write', 0.0):.1f} "
+                        f"total={action_averages.get('action_total', 0.0):.1f}",
+                        flush=True,
+                    )
+                timing_report_start_t = loop_done_t
+                timing_loop_count = 0
+                timing_totals_ms.clear()
+                timing_command_count = 0
+                action_timing_totals_ms.clear()
+
             duration = time.perf_counter() - start
         print("Cycle time reached.")
 

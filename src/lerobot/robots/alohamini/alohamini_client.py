@@ -19,6 +19,7 @@ import inspect
 import json
 import logging
 import time
+from collections import deque
 from functools import cached_property
 import os
 from typing import Any
@@ -62,11 +63,14 @@ class AlohaMiniClient(Robot):
 
         self.polling_timeout_ms = config.polling_timeout_ms
         self.connect_timeout_s = config.connect_timeout_s
+        self.observation_request_window = config.observation_request_window
+        if self.observation_request_window < 1:
+            raise ValueError("observation_request_window must be at least 1")
 
         self.zmq_context = None
         self.zmq_cmd_socket = None
         self.zmq_observation_socket = None
-        self._pending_observation_message = None
+        self._observation_request_tokens: deque[bytes] = deque()
         self._observation_request_id = 0
 
         self.last_frames = {}
@@ -148,25 +152,30 @@ class AlohaMiniClient(Robot):
         zmq_cmd_locator = f"tcp://{self.remote_ip}:{self.port_zmq_cmd}"
         self.zmq_cmd_socket.connect(zmq_cmd_locator)
 
-        # Request-driven observation transport: no observations are produced while
-        # this client is saving, so stale reset frames cannot accumulate in transit.
+        # Request-driven observation transport with a small bounded window. This covers
+        # network round-trip latency without allowing stale frames to accumulate unboundedly.
         self.zmq_observation_socket = self.zmq_context.socket(zmq.DEALER)
-        self.zmq_observation_socket.setsockopt(zmq.RCVHWM, 1)
-        self.zmq_observation_socket.setsockopt(zmq.SNDHWM, 1)
+        self.zmq_observation_socket.setsockopt(zmq.RCVHWM, self.observation_request_window)
+        self.zmq_observation_socket.setsockopt(zmq.SNDHWM, self.observation_request_window)
         zmq_observations_locator = f"tcp://{self.remote_ip}:{self.port_zmq_observations}"
         self.zmq_observation_socket.connect(zmq_observations_locator)
 
-        self._pending_observation_message = self._request_observation(self.connect_timeout_s * 1000)
-        if self._pending_observation_message is None:
+        handshake_message = self._request_observation(self.connect_timeout_s * 1000)
+        if handshake_message is None:
             raise DeviceNotConnectedError("Timeout waiting for AlohaMini Host to connect expired.")
+
+        # The handshake proves that the Host is available, but it may become stale while
+        # the remaining teleoperation devices connect. Discard it and fill a bounded request
+        # window for frames that get_observation() will consume.
+        self._fill_observation_request_window()
 
         self._is_connected = True
 
     def calibrate(self) -> None:
         pass
 
-    def _request_observation(self, timeout_ms: int) -> list[bytes] | None:
-        """Request one observation and ignore responses to older timed-out requests."""
+    def _send_observation_request(self) -> bytes | None:
+        """Send one observation request without waiting for its response."""
         zmq = self._zmq
         self._observation_request_id += 1
         request_token = str(self._observation_request_id).encode("ascii")
@@ -176,6 +185,13 @@ class AlohaMiniClient(Robot):
         except zmq.ZMQError as e:
             logging.error(f"ZMQ observation request failed: {e}")
             return None
+        return request_token
+
+    def _receive_observation_response(
+        self, request_token: bytes, timeout_ms: int
+    ) -> list[bytes] | None:
+        """Wait for one token-matched response and discard responses to older requests."""
+        zmq = self._zmq
 
         poller = zmq.Poller()
         poller.register(self.zmq_observation_socket, zmq.POLLIN)
@@ -201,17 +217,43 @@ class AlohaMiniClient(Robot):
                 if response and response[0] == request_token:
                     return response[1:]
 
+    def _request_observation(self, timeout_ms: int) -> list[bytes] | None:
+        """Send and synchronously receive one observation request."""
+        request_token = self._send_observation_request()
+        if request_token is None:
+            return None
+        return self._receive_observation_response(request_token, timeout_ms)
+
+    def _fill_observation_request_window(self) -> None:
+        """Keep a bounded number of requests in flight to cover transport latency."""
+        while len(self._observation_request_tokens) < self.observation_request_window:
+            request_token = self._send_observation_request()
+            if request_token is None:
+                break
+            self._observation_request_tokens.append(request_token)
+
     def _poll_and_get_latest_message(self) -> list[bytes] | None:
-        """Requests and returns the newest observation available from the host."""
+        """Consume the oldest response and replenish the bounded request window."""
 
-        if self._pending_observation_message is not None:
-            message = self._pending_observation_message
-            self._pending_observation_message = None
-            return message
+        if not self._observation_request_tokens:
+            self._fill_observation_request_window()
 
-        message = self._request_observation(self.polling_timeout_ms)
+        message = (
+            self._receive_observation_response(
+                self._observation_request_tokens.popleft(), self.polling_timeout_ms
+            )
+            if self._observation_request_tokens
+            else None
+        )
         if message is None:
             logging.info("No new data available within timeout.")
+            # A missing response may make the remaining ordered tokens ambiguous.
+            # Drop local bookkeeping; later responses are rejected by token matching.
+            self._observation_request_tokens.clear()
+        else:
+            # Replenish before decoding the current frame so Host work and transport overlap
+            # JPEG decoding, teleoperation, action sending, and dataset I/O.
+            self._fill_observation_request_window()
         return message
 
     def _parse_observation_json(self, obs_data: str | bytes) -> RobotObservation | None:
@@ -252,20 +294,27 @@ class AlohaMiniClient(Robot):
         self, message_parts: list[bytes]
     ) -> tuple[RobotObservation, dict[str, np.ndarray]] | None:
         """Parse either the new multipart JPEG protocol or the legacy base64 JSON protocol."""
+        parse_start_t = time.perf_counter()
         if not message_parts:
             return None
 
         observation = self._parse_observation_json(message_parts[0])
         if observation is None:
             return None
+        json_done_t = time.perf_counter()
 
         encoded_frames: dict[str, np.ndarray] = {}
+        decode_timings_ms: dict[str, float] = {}
         if len(message_parts) == 1:
             # Backward compatibility with the previous JSON/base64 protocol.
             for cam_name, image_b64 in observation.items():
                 if cam_name not in self._cameras_ft:
                     continue
+                decode_start_t = time.perf_counter()
                 frame = self._decode_image_from_b64(image_b64)
+                decode_timings_ms[f"decode_{cam_name}"] = (
+                    time.perf_counter() - decode_start_t
+                ) * 1e3
                 if frame is not None:
                     encoded_frames[cam_name] = frame
         else:
@@ -279,10 +328,20 @@ class AlohaMiniClient(Robot):
                     continue
                 if cam_name not in self._cameras_ft:
                     continue
+                decode_start_t = time.perf_counter()
                 frame = self._decode_image_from_jpeg_bytes(message_parts[index + 1])
+                decode_timings_ms[f"decode_{cam_name}"] = (
+                    time.perf_counter() - decode_start_t
+                ) * 1e3
                 if frame is not None:
                     encoded_frames[cam_name] = frame
 
+        parse_done_t = time.perf_counter()
+        self.logs["observation_decode_timing_ms"] = {
+            "obs_json": (json_done_t - parse_start_t) * 1e3,
+            **decode_timings_ms,
+            "obs_parse_decode": (parse_done_t - parse_start_t) * 1e3,
+        }
         return observation, encoded_frames
 
     def _remote_state_from_obs(
@@ -312,16 +371,29 @@ class AlohaMiniClient(Robot):
         If no new data arrives or decoding fails, returns the last known values.
         """
 
+        observation_start_t = time.perf_counter()
+
         # 1. Get the latest message from the socket
         latest_message_parts = self._poll_and_get_latest_message()
+        receive_done_t = time.perf_counter()
 
         # 2. If no message, return cached data
         if latest_message_parts is None:
+            self.logs["observation_timing_ms"] = {
+                "obs_wait": (receive_done_t - observation_start_t) * 1e3,
+                "obs_client_total": (receive_done_t - observation_start_t) * 1e3,
+            }
             return self.last_frames, self.last_remote_state
 
         # 3. Parse the observation message
         parsed = self._parse_observation_message(latest_message_parts)
+        parse_done_t = time.perf_counter()
         if parsed is None:
+            self.logs["observation_timing_ms"] = {
+                "obs_wait": (receive_done_t - observation_start_t) * 1e3,
+                **self.logs.get("observation_decode_timing_ms", {}),
+                "obs_client_total": (parse_done_t - observation_start_t) * 1e3,
+            }
             return self.last_frames, self.last_remote_state
         observation, encoded_frames = parsed
 
@@ -335,6 +407,13 @@ class AlohaMiniClient(Robot):
         self.last_frames = {**self.last_frames, **new_frames}
         self.last_remote_state = new_state
         self._observation_sequence += 1
+        observation_done_t = time.perf_counter()
+        self.logs["observation_timing_ms"] = {
+            "obs_wait": (receive_done_t - observation_start_t) * 1e3,
+            **self.logs.get("observation_decode_timing_ms", {}),
+            "obs_state": (observation_done_t - parse_done_t) * 1e3,
+            "obs_client_total": (observation_done_t - observation_start_t) * 1e3,
+        }
 
         return self.last_frames, new_state
 
@@ -462,6 +541,7 @@ class AlohaMiniClient(Robot):
     def disconnect(self):
         """Cleans ZMQ comms"""
 
+        self._observation_request_tokens.clear()
         self.zmq_observation_socket.close()
         self.zmq_cmd_socket.close()
         self.zmq_context.term()

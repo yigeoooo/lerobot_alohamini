@@ -14,7 +14,6 @@ from pathlib import Path
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.processor import make_default_processors
 from lerobot.robots.alohamini import AlohaMiniClient, AlohaMiniClientConfig
-from lerobot.scripts.lerobot_record import record_loop
 from lerobot.teleoperators.bi_so_leader import BiSOLeader, BiSOLeaderConfig
 from lerobot.teleoperators.keyboard import KeyboardTeleop, KeyboardTeleopConfig
 from lerobot.teleoperators.so_leader import SOLeaderConfig
@@ -22,6 +21,9 @@ from lerobot.utils.constants import ACTION, HF_LEROBOT_HOME, OBS_STR
 from lerobot.utils.feature_utils import hw_to_dataset_features
 from lerobot.utils.keyboard_input import init_keyboard_listener
 from lerobot.utils.utils import init_logging, log_say
+from lerobot.utils.visualization_utils import init_visualization, shutdown_visualization
+
+from record_utils import record_loop
 
 
 @contextmanager
@@ -117,6 +119,24 @@ def main():
     )
     parser.add_argument("--resume", action="store_true", help="Resume recording on existing dataset")
     parser.add_argument(
+        "--profile-timing",
+        "--profile_timing",
+        type=parse_bool,
+        nargs="?",
+        const=True,
+        default=False,
+        help="Print average per-stage recording-loop timings once per second (default: false).",
+    )
+    parser.add_argument(
+        "--display-data",
+        "--display_data",
+        type=parse_bool,
+        nargs="?",
+        const=True,
+        default=False,
+        help="Display observations and actions in Rerun while recording (default: disabled).",
+    )
+    parser.add_argument(
         "--dataset.push_to_hub",
         "--push_to_hub",
         dest="push_to_hub",
@@ -186,6 +206,8 @@ def main():
 
     if not robot.is_connected or not leader_arm.is_connected or not keyboard.is_connected:
         raise ValueError("Robot or teleop is not connected!")
+    if args.display_data:
+        init_visualization("rerun", session_name="alohamini_record")
     recorded_episodes = 0
 
     def print_countdown(
@@ -194,15 +216,50 @@ def main():
         remaining_s: int,
         *,
         is_recording: bool,
+        actual_fps: float | None = None,
     ) -> None:
         """Render every countdown with the same one-line layout."""
         recording_state = "RECORDING" if is_recording else "NOT RECORDING"
         # Keep this deliberately short: a wrapped terminal row cannot be reliably
         # rewritten with carriage return and would make every tick appear as a new line.
         message = f"[{phase:<7}] Ep {episode_number:<3} | {remaining_s:>4}s | {recording_state}"
+        if actual_fps is not None:
+            message += f" | FPS {actual_fps:>5.1f}/{args.fps}"
         # Clear and rewrite one terminal row so per-second updates do not scroll the screen.
         sys.stdout.write(f"\r\033[2K{message}")
         sys.stdout.flush()
+
+    def episode_frame_count() -> int:
+        """Return the number of frames currently buffered for the active episode."""
+        episode_buffer = dataset.writer.episode_buffer
+        return 0 if episode_buffer is None else int(episode_buffer["size"])
+
+    def print_record_timing(timing: dict[str, float]) -> None:
+        """Print one aggregated timing line without mixing it into the countdown row."""
+        sys.stdout.write("\r\033[2K")
+        print(
+            f"[PC TIMING avg ms/frame] FPS={timing['capture_fps']:.1f}/{args.fps} "
+            f"obs={timing['observation']:.1f} obs_proc={timing['observation_processing']:.1f} "
+            f"frame={timing['frame_build']:.1f} teleop={timing['teleop']:.1f} "
+            f"send={timing['send_action']:.1f} dataset={timing['dataset_write']:.1f} "
+            f"display={timing['display']:.1f} sleep={timing['sleep']:.1f} "
+            f"loop={timing['loop']:.1f}",
+            flush=True,
+        )
+        decode_text = " ".join(
+            f"{name}={value:.1f}"
+            for name, value in timing.items()
+            if name.startswith("decode_")
+        )
+        if "obs_wait" in timing:
+            print(
+                f"[PC OBS avg ms/frame] wait={timing['obs_wait']:.1f} "
+                f"json={timing.get('obs_json', 0.0):.1f} {decode_text} "
+                f"parse_decode={timing.get('obs_parse_decode', 0.0):.1f} "
+                f"state={timing.get('obs_state', 0.0):.1f} "
+                f"client_total={timing.get('obs_client_total', 0.0):.1f}",
+                flush=True,
+            )
 
     def reset_environment(episode_number: int) -> None:
         """Reset the scene while continuously draining remote observations."""
@@ -232,13 +289,14 @@ def main():
                 robot=robot,
                 events=events,
                 fps=args.fps,
-                teleop=[leader_arm, keyboard],
+                leader_arm=leader_arm,
+                keyboard=keyboard,
                 control_time_s=args.reset_time,
                 single_task=args.task_description,
-                display_data=False,
                 teleop_action_processor=teleop_action_processor,
                 robot_action_processor=robot_action_processor,
                 robot_observation_processor=robot_observation_processor,
+                display_data=args.display_data,
             )
         finally:
             countdown_stopped.set()
@@ -260,18 +318,31 @@ def main():
     def record_episode(episode_number: int) -> None:
         """Record one episode while displaying its remaining time."""
         countdown_stopped = threading.Event()
+        initial_frame_count = episode_frame_count()
+        recording_started_at = time.monotonic()
 
         def show_countdown() -> None:
             deadline = time.monotonic() + args.episode_time
             last_remaining = None
+            last_sample_t = recording_started_at
+            last_frame_count = initial_frame_count
+            actual_fps = None
             while not countdown_stopped.is_set():
-                remaining = max(0, math.ceil(deadline - time.monotonic()))
+                now = time.monotonic()
+                remaining = max(0, math.ceil(deadline - now))
                 if remaining != last_remaining:
+                    current_frame_count = episode_frame_count()
+                    sample_duration_s = now - last_sample_t
+                    if sample_duration_s >= 0.5:
+                        actual_fps = (current_frame_count - last_frame_count) / sample_duration_s
+                        last_sample_t = now
+                        last_frame_count = current_frame_count
                     print_countdown(
                         "RECORD",
                         episode_number,
                         remaining,
                         is_recording=True,
+                        actual_fps=actual_fps,
                     )
                     last_remaining = remaining
                 if remaining == 0:
@@ -286,18 +357,28 @@ def main():
                 events=events,
                 fps=args.fps,
                 dataset=dataset,
-                teleop=[leader_arm, keyboard],
+                leader_arm=leader_arm,
+                keyboard=keyboard,
                 control_time_s=args.episode_time,
                 single_task=args.task_description,
-                display_data=False,
                 teleop_action_processor=teleop_action_processor,
                 robot_action_processor=robot_action_processor,
                 robot_observation_processor=robot_observation_processor,
+                timing_callback=print_record_timing if args.profile_timing else None,
+                display_data=args.display_data,
             )
         finally:
+            recording_elapsed_s = time.monotonic() - recording_started_at
+            recorded_frames = episode_frame_count() - initial_frame_count
             countdown_stopped.set()
             countdown_thread.join()
             print(flush=True)
+            average_fps = recorded_frames / recording_elapsed_s if recording_elapsed_s > 0 else 0.0
+            print(
+                f"Episode {episode_number} capture rate: {average_fps:.2f} FPS "
+                f"({recorded_frames} frames in {recording_elapsed_s:.2f}s; target {args.fps} FPS)",
+                flush=True,
+            )
 
     while recorded_episodes < args.num_episodes and not events["stop_recording"]:
         episode_number = dataset.num_episodes + 1
@@ -357,6 +438,8 @@ def main():
         dataset.finalize()
     if args.push_to_hub:
         dataset.push_to_hub()
+    if args.display_data:
+        shutdown_visualization("rerun")
     print(f"Dataset saved at {dataset.root.resolve()}", flush=True)
 
 

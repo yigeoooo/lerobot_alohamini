@@ -113,6 +113,7 @@ class AlohaMini(Robot):
     def __init__(self, config: AlohaMiniConfig):
         super().__init__(config)
         self.config = config
+        self.logs: dict[str, Any] = {}
         norm_mode_body = MotorNormMode.DEGREES if config.use_degrees else MotorNormMode.RANGE_M100_100
 
         specs = validate_robot_model(config.robot_model)
@@ -616,7 +617,7 @@ class AlohaMini(Robot):
     @check_if_not_connected
     def get_observation(self) -> RobotObservation:
         # Read actuators position for arm and vel for base
-        start = time.perf_counter()
+        observation_start_t = time.perf_counter()
         # arm_pos = self.left_bus.sync_read("Present_Position", self.arm_motors)
 
         #print(f"Left arm motors: {self.left_arm_motors}, Right arm motors: {self.right_arm_motors}")  # debug
@@ -625,6 +626,7 @@ class AlohaMini(Robot):
             if self.left_arm_motors
             else {}
         )
+        left_arm_done_t = time.perf_counter()
 
 
         base_wheel_vel = self.left_bus.sync_read("Present_Velocity", self.base_motors)
@@ -634,32 +636,50 @@ class AlohaMini(Robot):
             base_wheel_vel["base_back_wheel"],
             base_wheel_vel["base_right_wheel"],
         )
+        base_done_t = time.perf_counter()
 
         right_pos = (
             self.right_bus.sync_read("Present_Position", self.right_arm_motors)
             if self.right_bus and self.right_arm_motors
             else {}
         )
+        right_arm_done_t = time.perf_counter()
 
         left_arm_state = {f"{k}.pos": v for k, v in left_pos.items()}
         right_arm_state = {f"{k}.pos": v for k, v in right_pos.items()}
 
         obs_dict = {**left_arm_state, **right_arm_state,**base_vel}
         self.lift.contribute_observation(obs_dict)
+        lift_done_t = time.perf_counter()
         #print(f"Observation dict so far: {obs_dict}")  # debug
 
-        dt_ms = (time.perf_counter() - start) * 1e3
+        dt_ms = (lift_done_t - observation_start_t) * 1e3
         logger.debug(f"{self} read state: {dt_ms:.1f}ms")
 
         # currents protection
         self.read_and_check_currents(limit_ma=2000, print_currents=True)
+        currents_done_t = time.perf_counter()
 
         # Capture images from cameras
+        camera_timings_ms = {}
         for cam_key, cam in self.cameras.items():
-            start = time.perf_counter()
+            camera_start_t = time.perf_counter()
             obs_dict[cam_key] = cam.async_read()
-            dt_ms = (time.perf_counter() - start) * 1e3
+            camera_done_t = time.perf_counter()
+            dt_ms = (camera_done_t - camera_start_t) * 1e3
+            camera_timings_ms[f"camera_{cam_key}"] = dt_ms
             logger.debug(f"{self} read {cam_key}: {dt_ms:.1f}ms")
+
+        observation_done_t = time.perf_counter()
+        self.logs["observation_timing_ms"] = {
+            "left_arm": (left_arm_done_t - observation_start_t) * 1e3,
+            "base": (base_done_t - left_arm_done_t) * 1e3,
+            "right_arm": (right_arm_done_t - base_done_t) * 1e3,
+            "lift": (lift_done_t - right_arm_done_t) * 1e3,
+            "currents": (currents_done_t - lift_done_t) * 1e3,
+            **camera_timings_ms,
+            "robot_observation_total": (observation_done_t - observation_start_t) * 1e3,
+        }
 
         return obs_dict
 
@@ -677,6 +697,7 @@ class AlohaMini(Robot):
         Returns:
             np.ndarray: the action sent to the motors, potentially clipped.
         """
+        action_start_t = time.perf_counter()
         # arm_goal_pos = {k: v for k, v in action.items() if k.endswith(".pos")}
         left_pos  = {k: v for k, v in action.items() if k.endswith(".pos") and k.startswith("arm_left_") and k.replace(".pos", "") in self.left_bus.motors}
         right_pos = {k: v for k, v in action.items() if k.endswith(".pos") and k.startswith("arm_right_") and self.right_bus is not None and k.replace(".pos", "") in self.right_bus.motors}
@@ -687,6 +708,7 @@ class AlohaMini(Robot):
         base_wheel_goal_vel = self._body_to_wheel_raw(
             base_goal_vel["x.vel"], base_goal_vel["y.vel"], base_goal_vel["theta.vel"]
         )
+        prepare_done_t = time.perf_counter()
 
         # Cap goal position when too far away from present position.
         # /!\ Slower fps expected due to reading from the follower.
@@ -697,6 +719,7 @@ class AlohaMini(Robot):
         #     arm_goal_pos = arm_safe_goal_pos
 
         self.lift.apply_action(action)
+        lift_action_done_t = time.perf_counter()
 
         if left_pos and self.config.max_relative_target is not None:
             present_left = self.left_bus.sync_read("Present_Position", self.left_arm_motors)  # left_arm_*
@@ -707,12 +730,18 @@ class AlohaMini(Robot):
             present_right = self.right_bus.sync_read("Present_Position", self.right_arm_motors)
             gp_right = {k: (v, present_right[k.replace(".pos", "")]) for k, v in right_pos.items()}
             right_pos = ensure_safe_goal_position(gp_right, self.config.max_relative_target)
+        relative_limit_done_t = time.perf_counter()
 
         left_pos = self._limit_gripper_goal_by_current(self.left_bus, left_pos)
+        left_gripper_limit_done_t = time.perf_counter()
         left_pos = self._limit_joint_goal_by_current(self.left_bus, left_pos)
+        left_joint_limit_done_t = time.perf_counter()
         if self.right_bus and right_pos:
             right_pos = self._limit_gripper_goal_by_current(self.right_bus, right_pos)
+        right_gripper_limit_done_t = time.perf_counter()
+        if self.right_bus and right_pos:
             right_pos = self._limit_joint_goal_by_current(self.right_bus, right_pos)
+        right_joint_limit_done_t = time.perf_counter()
 
         # Send goal position to the actuators
         # arm_goal_pos_raw = {k.replace(".pos", ""): v for k, v in arm_goal_pos.items()}
@@ -725,9 +754,26 @@ class AlohaMini(Robot):
     
         if left_pos:
             self.left_bus.sync_write("Goal_Position", {k.replace(".pos", ""): v for k, v in left_pos.items()})
+        left_write_done_t = time.perf_counter()
         if self.right_bus and right_pos:
             self.right_bus.sync_write("Goal_Position", {k.replace(".pos", ""): v for k, v in right_pos.items()})
+        right_write_done_t = time.perf_counter()
         self.left_bus.sync_write("Goal_Velocity", base_wheel_goal_vel)
+        base_write_done_t = time.perf_counter()
+
+        self.logs["action_timing_ms"] = {
+            "action_prepare": (prepare_done_t - action_start_t) * 1e3,
+            "action_lift": (lift_action_done_t - prepare_done_t) * 1e3,
+            "action_relative_limit": (relative_limit_done_t - lift_action_done_t) * 1e3,
+            "action_left_gripper_limit": (left_gripper_limit_done_t - relative_limit_done_t) * 1e3,
+            "action_left_joint_limit": (left_joint_limit_done_t - left_gripper_limit_done_t) * 1e3,
+            "action_right_gripper_limit": (right_gripper_limit_done_t - left_joint_limit_done_t) * 1e3,
+            "action_right_joint_limit": (right_joint_limit_done_t - right_gripper_limit_done_t) * 1e3,
+            "action_left_write": (left_write_done_t - right_joint_limit_done_t) * 1e3,
+            "action_right_write": (right_write_done_t - left_write_done_t) * 1e3,
+            "action_base_write": (base_write_done_t - right_write_done_t) * 1e3,
+            "action_total": (base_write_done_t - action_start_t) * 1e3,
+        }
 
         lift_sent = {k: v for k, v in action.items() if k.startswith("lift_axis.")}
         return {**left_pos, **right_pos, **base_goal_vel, **lift_sent}
