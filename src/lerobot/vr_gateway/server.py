@@ -100,6 +100,7 @@ class GatewayStats:
     poses_stale: int = 0
     messages_coalesced: int = 0
     joint_steps_clamped: int = 0
+    arm_reanchor_rejected: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -109,6 +110,7 @@ class GatewayStats:
             "poses_stale": self.poses_stale,
             "messages_coalesced": self.messages_coalesced,
             "joint_steps_clamped": self.joint_steps_clamped,
+            "arm_reanchor_rejected": self.arm_reanchor_rejected,
         }
 
 
@@ -434,8 +436,12 @@ class VRGateway:
                 return {"type": "ack", "for": "arm", "ignored": "estop"}
             if self.arm_frozen:
                 return {"type": "ack", "for": "arm", "ignored": "clutch"}
-            age = self._pose_age_s(message)
-            if age is not None and age > self.config.max_pose_age_s:
+            # Release packets must always be accepted: dropping a delayed active=false
+            # would leave the old clutch reference live and make the next grip engage
+            # against stale controller poses. Only active pose samples are freshness-gated.
+            active = bool(message.get("active"))
+            age = self._pose_age_s(message) if active else None
+            if active and age is not None and age > self.config.max_pose_age_s:
                 self.stats.poses_stale += 1
                 self._warn(
                     "stale_pose",
@@ -448,7 +454,41 @@ class VRGateway:
             if self._pending_arm is not None:
                 self.stats.messages_coalesced += 1
             self._pending_arm = message
-            return {"type": "ack", "for": "arm", "status": "staged"}
+            return {
+                "type": "ack",
+                "for": "arm",
+                "status": "staged",
+                "reanchor": bool(message.get("reanchor")),
+            }
+
+        if kind in {"reanchor", "align"}:
+            if self.arm_ik is None:
+                return {"type": "ack", "for": "reanchor", "status": "ik_unavailable"}
+            if self.estopped:
+                return {"type": "ack", "for": "reanchor", "ignored": "estop"}
+            left = message.get("left") or message.get("left_pose")
+            right = message.get("right") or message.get("right_pose")
+            if not left or not right:
+                self.stats.arm_reanchor_rejected += 1
+                return {
+                    "type": "ack",
+                    "for": "reanchor",
+                    "status": "rejected",
+                    "reason": "missing_controller_pose",
+                }
+            active = {
+                "type": "arm_pose",
+                "active": True,
+                "left": left,
+                "right": right,
+                "reanchor": True,
+            }
+            if "client_time_ms" in message:
+                active["client_time_ms"] = message["client_time_ms"]
+            if self._pending_arm is not None:
+                self.stats.messages_coalesced += 1
+            self._pending_arm = active
+            return {"type": "ack", "for": "reanchor", "status": "staged"}
 
         raise ValueError(f"unknown message type: {kind!r}")
 
@@ -480,18 +520,20 @@ class VRGateway:
             return {}
         if updates:
             self.stats.ik_applied += 1
-            self._last_arm_status = "applied"
+            self._last_arm_status = "reanchored" if payload.get("reanchor") else "applied"
             return updates
         # An empty result while the operator is squeezing both grips means the IK
         # rejected the pose; without this the arm just silently stops tracking.
         if payload.get("active"):
             self.stats.ik_rejected += 1
-            self._last_arm_status = "rejected"
+            reason = getattr(self.arm_ik, "engage_reason", None) or "no_joint_targets"
+            self._last_arm_status = f"rejected:{reason}"
             self._warn(
                 "ik_rejected",
-                "[VR] arm IK rejected %d of %d active poses (latest returned no joint targets)",
+                "[VR] arm IK rejected %d of %d active poses (%s)",
                 self.stats.ik_rejected,
                 self.stats.ik_rejected + self.stats.ik_applied,
+                reason,
             )
         else:
             self._last_arm_status = "held"
@@ -524,8 +566,10 @@ class VRGateway:
         """
         ack = self.stage_message(message)
         self.flush()
-        if ack.get("for") == "arm" and self._last_arm_status is not None:
+        if ack.get("for") in {"arm", "reanchor"} and self._last_arm_status is not None:
             ack["status"] = self._last_arm_status
+            if self._last_arm_status.startswith("rejected:"):
+                ack["reason"] = self._last_arm_status.split(":", 1)[1]
         return ack
 
     def watchdog(self) -> bool:
@@ -576,6 +620,9 @@ class VRGateway:
                 if width and frame.shape[1] > width:
                     height = max(1, round(frame.shape[0] * width / frame.shape[1]))
                     frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
+                # AlohaMini camera observations are RGB, while OpenCV expects BGR.
+                # Convert explicitly so browser JPEGs preserve the camera colors.
+                frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
                 ok, encoded = cv2.imencode(
                     ".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), self.config.jpeg_quality]
                 )
@@ -598,6 +645,12 @@ class VRGateway:
             "arm_frozen": self.arm_frozen,
             "calibrated": self.calibrated,
             "ik_available": self.arm_ik is not None,
+            "arm_ik_active": bool(getattr(self.arm_ik, "active", False)),
+            "arm_homing": bool(getattr(self.arm_ik, "homing", False)),
+            "arm_home_max_error_deg": getattr(self.arm_ik, "home_max_error_deg", None),
+            "arm_engage_reason": getattr(self.arm_ik, "engage_reason", None),
+            "arm_pending": self._pending_arm is not None,
+            "arm_pending_reanchor": bool(self._pending_arm and self._pending_arm.get("reanchor")),
             "control_hz": self.config.control_hz,
             **self.stats.as_dict(),
             "action_ms": round(float(timings.get("action_timing_ms", {}).get("action_total", 0.0)), 1),
@@ -763,8 +816,13 @@ def main() -> None:  # pragma: no cover - CLI convenience
     # VR opens only the head/forward camera; wrist cameras remain untouched.
     robot_config.cameras = {"forward": robot_config.cameras["forward"]}
     robot = AlohaMini(robot_config)
-    urdf = Path(__file__).with_name("assets") / "alohamini2pro" / "urdf" / "alohamini2pro.urdf"
-    arm_ik = AlohaMiniDualArmIK(urdf) if urdf.exists() else None
+    urdf = Path(__file__).parent / "assets" / "alohamini2pro" / "urdf" / "alohamini2pro.urdf"
+    if not urdf.is_file():
+        raise FileNotFoundError(
+            f"AlohaMini 2 Pro URDF is required at {urdf}; sync src/lerobot/vr_gateway/assets "
+            "to the Raspberry Pi before starting the VR gateway."
+        )
+    arm_ik = AlohaMiniDualArmIK(urdf)
     gateway_config = VRGatewayConfig(
         camera_name="forward",
         control_hz=args.control_hz,

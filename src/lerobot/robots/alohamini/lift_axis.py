@@ -8,6 +8,7 @@ class BusLike(Protocol):
     def read(self, item: str, name: str) -> float: ...
     def write(self, item: str, name: str, value: float) -> None: ...
     def sync_write(self, item: str, values: Dict[str, float]) -> None: ...
+    def enable_torque(self, motors: str | list[str] | None = None, num_retry: int = 0) -> None: ...
 
 from lerobot.motors import Motor, MotorNormMode
 from lerobot.motors.feetech import OperatingMode
@@ -104,37 +105,34 @@ class LiftAxis:
         if not self.enabled: return
         self.configure()
         name = self.cfg.name
-        # Move downward
-        v_down = self.cfg.home_down_speed 
-        self._bus.write("Goal_Velocity", name, v_down)
-        stuck = 0
-        last_tick = int(self._bus.read("Present_Position", name, normalize=False))
-        for _ in range(600):  # ~30s @50ms
-            time.sleep(0.05)
-            self._update_extended_ticks()
-            now_tick = self._last_tick
-            moved = abs(now_tick - last_tick) > 10
-            last_tick = now_tick
-            cur_ma = 0
-            raw_cur_ma = 0
-            if use_current:
-                try: 
-                    raw_cur_ma = int(self._bus.read("Present_Current", name, normalize=False))
-                    cur_ma = raw_cur_ma * 6.5
-                    print(f"[lift_axis.home] Present_Current={cur_ma} mA")  # debug
-                    print(f"[lift_axis.home] Present_Position={now_tick} ticks")  # debug
-
-                except Exception: cur_ma = 0
-            if (use_current and cur_ma >= self.cfg.home_stall_current_ma) or (not moved):
-                print(f"[lift_axis.home] Stalled at current={cur_ma} mA, moved={moved}")  # debug
-                stuck += 1
-            else:
-                stuck = 0
-            if stuck >= 2: break
-        #self._bus.write("Goal_Velocity", name, 0)
-        self._bus.write("Torque_Enable", name, 0)
-        print("Disable torque output (motor will be released)")
-        time.sleep(1)
+        self._bus.enable_torque(name)
+        try:
+            v_down = self.cfg.home_down_speed
+            self._bus.write("Goal_Velocity", name, v_down)
+            stuck = 0
+            last_tick = int(self._bus.read("Present_Position", name, normalize=False))
+            for _ in range(600):  # ~30s @50ms
+                time.sleep(0.05)
+                self._update_extended_ticks()
+                now_tick = self._last_tick
+                moved = abs(now_tick - last_tick) > 10
+                last_tick = now_tick
+                cur_ma = 0
+                if use_current:
+                    try:
+                        cur_ma = int(self._bus.read("Present_Current", name, normalize=False)) * 6.5
+                    except Exception:
+                        cur_ma = 0
+                if (use_current and cur_ma >= self.cfg.home_stall_current_ma) or not moved:
+                    stuck += 1
+                else:
+                    stuck = 0
+                if stuck >= 2:
+                    break
+        finally:
+            # Velocity goals latch in the servo. Always stop explicitly, including when
+            # a read fails during homing, and leave torque enabled for later lift actions.
+            self._bus.write("Goal_Velocity", name, 0)
 
         self._update_extended_ticks()
         self._z0_deg = self._extended_deg()       

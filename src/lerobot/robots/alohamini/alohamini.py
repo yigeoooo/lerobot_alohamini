@@ -429,24 +429,43 @@ class AlohaMini(Robot):
 
 
 
+    @staticmethod
+    def _enable_and_verify_torque(bus: FeetechMotorsBus, motor_names: list[str]) -> None:
+        """Enable a configured bus and fail startup if a motor stayed torque-off."""
+        if not motor_names:
+            return
+        bus.enable_torque(motor_names)
+        disabled = [
+            name
+            for name in motor_names
+            if int(bus.read("Torque_Enable", name, normalize=False)) != 1
+        ]
+        if disabled:
+            raise RuntimeError(f"Failed to enable torque for motors: {disabled}")
+
     def configure(self):
-        # Set-up arm actuators (position mode)
-        # We assume that at connection time, arm is in a rest position,
-        # and torque can be safely disabled to run calibration.
+        # Mode/PID registers require torque-off. Before enabling the bus again, seed
+        # position-mode motors from their measured pose and velocity-mode motors with
+        # zero, so reconnecting cannot replay a stale target from servo memory.
         self.left_bus.disable_torque()
         self.left_bus.configure_motors()
         for name in self.left_arm_motors:
             self.left_bus.write("Operating_Mode", name, OperatingMode.POSITION.value)
-            # Set P_Coefficient to lower value to avoid shakiness (Default is 32)
             self.left_bus.write("P_Coefficient", name, 16)
-            # Set I_Coefficient and D_Coefficient to default value 0 and 32
             self.left_bus.write("I_Coefficient", name, 0)
             self.left_bus.write("D_Coefficient", name, 32)
 
         for name in self.base_motors:
             self.left_bus.write("Operating_Mode", name, OperatingMode.VELOCITY.value)
+        self.lift.configure()
 
-        #self.left_bus.enable_torque()
+        if self.left_arm_motors:
+            present = self.left_bus.sync_read("Present_Position", self.left_arm_motors)
+            self.left_bus.sync_write("Goal_Position", present)
+        self.left_bus.sync_write("Goal_Velocity", dict.fromkeys(self.base_motors, 0))
+        if self.lift.enabled:
+            self.left_bus.write("Goal_Velocity", self.lift.cfg.name, 0)
+        self._enable_and_verify_torque(self.left_bus, list(self.left_bus.motors))
 
         if self.right_bus:
             self.right_bus.disable_torque()
@@ -456,9 +475,17 @@ class AlohaMini(Robot):
                 self.right_bus.write("P_Coefficient", name, 16)
                 self.right_bus.write("I_Coefficient", name, 0)
                 self.right_bus.write("D_Coefficient", name, 32)
-            #self.right_bus.enable_torque()
+            if self.right_arm_motors:
+                present = self.right_bus.sync_read("Present_Position", self.right_arm_motors)
+                self.right_bus.sync_write("Goal_Position", present)
+            self._enable_and_verify_torque(self.right_bus, list(self.right_bus.motors))
 
-        #self.lift.configure()
+        logger.info(
+            "%s configured with torque enabled (left=%d motors, right=%d motors)",
+            self,
+            len(self.left_bus.motors),
+            len(self.right_bus.motors) if self.right_bus else 0,
+        )
 
 
 
