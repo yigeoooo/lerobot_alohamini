@@ -63,6 +63,8 @@
       status.textContent = `connected · ${message.for}${detail ? ' · ' + detail : ''}`;
       if (message.ignored || message.status === 'rejected' || message.status === 'stale') {
         logInput(`指令被拒绝：${message.for} ${detail}`);
+      } else if (message.status === 'reanchored') {
+        logInput('重锚定完成：当前姿态已作为起点');
       }
     }
     if (message.type === 'status') reportStatus(message);
@@ -74,7 +76,17 @@
   function reportStatus(message) {
     const parts = [];
     if (message.estop) parts.push('急停中');
-    if (message.arm_frozen) parts.push('手臂锁定');
+    if (message.arm_frozen) parts.push('手臂保持');
+    if (message.calibrated) parts.push('校准标志');
+    if (message.arm_pending_reanchor) parts.push('等待重锚定');
+    if (message.arm_homing) {
+      const error = Number(message.arm_home_max_error_deg);
+      parts.push(Number.isFinite(error) ? `机械臂归位中 ${error.toFixed(1)}°` : '机械臂归位中');
+    } else if (message.arm_ik_active) {
+      parts.push('机械臂跟随中');
+    } else if (message.arm_engage_reason) {
+      parts.push(`原因:${message.arm_engage_reason}`);
+    }
     if (!message.ik_available) parts.push('IK 不可用');
     status.textContent = `connected${parts.length ? ' · ' + parts.join(' · ') : ''}`;
     // Surface IK rejections: previously the arm just stopped tracking in silence.
@@ -132,16 +144,22 @@
   $('reset-estop').onclick = () => send({ type: 'estop', enabled: false });
   $('calibrate').onclick = () => send({ type: 'calibrate', enabled: true });
 
+  $('reanchor').onclick = () => {
+    armReanchorRequested = true;
+    logInput('请求重锚定：下一次双手 grip 会以当前姿态作为起点');
+    status.textContent = 'waiting re-anchor';
+  };
+
   // "Clutch" is now an explicit arm freeze: off (the default) means the arms follow the
   // controller grips, on means arm poses are ignored while the base still drives.
   let armFrozen = false;
   const clutchButton = $('clutch');
-  clutchButton.textContent = 'Arm freeze: off';
+  clutchButton.textContent = 'Hold arms: off';
   clutchButton.onclick = () => {
     armFrozen = !armFrozen;
-    clutchButton.textContent = `Arm freeze: ${armFrozen ? 'on' : 'off'}`;
+    clutchButton.textContent = `Hold arms: ${armFrozen ? 'on' : 'off'}`;
     send({ type: 'clutch', enabled: armFrozen });
-    logInput(armFrozen ? '手臂已锁定（忽略手柄姿态）' : '手臂已解锁（跟随手柄）');
+    logInput(armFrozen ? '手臂保持中（忽略手柄姿态）' : '手臂恢复跟随');
   };
 
   $('lift').oninput = (e) => {
@@ -299,6 +317,7 @@
   let lastControlSend = 0;
   let lastDiagSend = 0;
   let armWasActive = false;
+  let armReanchorRequested = false;
   let buttonSignature = '';
   let joystickWasActive = false;
   let lastJoystickLog = 0;
@@ -362,10 +381,19 @@
     const gripPressed = (g) => !!g && (g.pressed || g.value > 0.5);
     const poseFresh = (t - leftGripPoseAt) <= 120 && (t - rightGripPoseAt) <= 120;
     const active = gripPressed(lb[1]) && gripPressed(rb[1]) && !!leftGripPose && !!rightGripPose && poseFresh;
+    const reanchor = armReanchorRequested && active;
     // Idle poses are pure overhead once the IK has been released, so send them only
     // while the clutch is squeezed plus one final packet to release it.
-    if (!active && !armWasActive) return;
+    if (!active && !armWasActive && !armReanchorRequested) return;
+    if (active !== armWasActive) {
+      const leftGrip = Number(lb[1]?.value || 0).toFixed(2);
+      const rightGrip = Number(rb[1]?.value || 0).toFixed(2);
+      logInput(active
+        ? `双 grip 已激活（左=${leftGrip} 右=${rightGrip}），开始归位/跟随`
+        : `双 grip 已释放（左=${leftGrip} 右=${rightGrip}），机械臂保持`);
+    }
     armWasActive = active;
+    if (reanchor) armReanchorRequested = false;
     send({
       type: 'arm_pose',
       // Client-sampled timestamp: the server measures relative delay from it and
@@ -376,7 +404,9 @@
       right: rightGripPose,
       left_gripper: Number(lb[0]?.value || 0),
       right_gripper: Number(rb[0]?.value || 0),
+      reanchor,
     });
+    if (reanchor) logInput('已发送重锚定：把当前双手姿态作为摇操起点');
   }
 
   function faceButtonIndices(rb) {
@@ -488,6 +518,7 @@
         rightGripPose = null;
         leftGripPoseAt = 0;
         rightGripPoseAt = 0;
+        armReanchorRequested = false;
         // Release the arm clutch and stop the base: the frame loop is gone and can no
         // longer do it, and the server would otherwise hold the last commanded values
         // until the watchdog expires.
