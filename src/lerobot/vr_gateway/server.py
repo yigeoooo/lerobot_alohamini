@@ -319,6 +319,12 @@ class VRGateway:
         # Hold wherever the arms physically are rather than at a stale IK target.
         self._reset_arm_targets()
 
+    def _arm_motion_active(self) -> bool:
+        """Return whether an arm clutch is active or queued for the next flush."""
+        if self._pending_arm is not None and bool(self._pending_arm.get("active")):
+            return True
+        return bool(getattr(self.arm_ik, "active", False))
+
     def stage_message(self, message: dict[str, Any]) -> dict[str, Any]:
         """Validate one protocol message and fold it into the pending command state.
 
@@ -381,6 +387,9 @@ class VRGateway:
         if kind in {"base", "drive"}:
             if self.estopped:
                 return {"type": "ack", "for": "base", "ignored": "estop"}
+            if self._arm_motion_active():
+                self._stage_updates(dict.fromkeys(BASE_VELOCITY_KEYS, 0.0))
+                return {"type": "ack", "for": "base", "ignored": "arm_clutch"}
             updates = {name: float(message.get(name, 0.0)) for name in BASE_VELOCITY_KEYS}
             source = str(message.get("source", message.get("input", "joystick")))
             current_base = tuple(updates[name] for name in BASE_VELOCITY_KEYS)
@@ -401,6 +410,9 @@ class VRGateway:
         if kind == "lift":
             if self.estopped:
                 return {"type": "ack", "for": "lift", "ignored": "estop"}
+            if self._arm_motion_active():
+                self._stage_updates({LIFT_VELOCITY_KEY: 0.0})
+                return {"type": "ack", "for": "lift", "ignored": "arm_clutch"}
             state = self._state()
             button = message.get("button", message.get("input", ""))
             if "velocity" in message or "vel" in message:
@@ -466,6 +478,12 @@ class VRGateway:
             if self._pending_arm is not None:
                 self.stats.messages_coalesced += 1
             self._pending_arm = message
+            # The browser sends base/lift and arm packets in the same frame. If
+            # this arm packet engages a clutch, cancel any velocity staged just
+            # before it so the first arm tick is stationary too.
+            if active:
+                self._pending_updates.update(dict.fromkeys(BASE_VELOCITY_KEYS, 0.0))
+                self._pending_updates[LIFT_VELOCITY_KEY] = 0.0
             return {
                 "type": "ack",
                 "for": "arm",
@@ -658,6 +676,7 @@ class VRGateway:
             "calibrated": self.calibrated,
             "ik_available": self.arm_ik is not None,
             "arm_ik_active": bool(getattr(self.arm_ik, "active", False)),
+            "arm_active_sides": sorted(getattr(self.arm_ik, "active_sides", ())),
             "arm_homing": bool(getattr(self.arm_ik, "homing", False)),
             "arm_home_max_error_deg": getattr(self.arm_ik, "home_max_error_deg", None),
             "arm_engage_reason": getattr(self.arm_ik, "engage_reason", None),
@@ -843,6 +862,9 @@ def main() -> None:  # pragma: no cover - CLI convenience
         position_scale=0.5,
         max_joint_speed_deg_s=90.0,
         state_blend=0.1,
+        # Match the ROS2 teleop clutch: latch the measured FK pose immediately.
+        # Runtime VR engagement must not move the arm to a preset home posture.
+        home_before_engage=False,
     )
     gateway_config = VRGatewayConfig(
         camera_name="forward",

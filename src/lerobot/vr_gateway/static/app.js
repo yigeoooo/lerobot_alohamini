@@ -313,16 +313,20 @@
   let rightGripPose = null;
   let leftGripPoseAt = 0;
   let rightGripPoseAt = 0;
+  let headPose = null;
+  let bodyBasis = null;
   let lastPoseSend = 0;
   let lastControlSend = 0;
   let lastDiagSend = 0;
   let armWasActive = false;
+  let armWasActiveSides = { left: false, right: false };
   let armReanchorRequested = false;
   let buttonSignature = '';
   let joystickWasActive = false;
   let lastJoystickLog = 0;
   let prevA = false;
   let prevB = false;
+  let prevY = false;
   let liftCommand = 0;
   let lastLiftSend = 0;
 
@@ -333,6 +337,29 @@
       orientation: [p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w],
     };
   }
+
+  function yawMatrixFromPose(pose) {
+    if (!pose?.orientation) return null;
+    const [x, y, z, w] = pose.orientation;
+    const yaw = Math.atan2(2 * (w * y + x * z), 1 - 2 * (y * y + z * z));
+    const c = Math.cos(yaw);
+    const s = Math.sin(yaw);
+    return [c, 0, s, 0, 1, 0, -s, 0, c];
+  }
+
+  function transpose3(m) {
+    return [m[0], m[3], m[6], m[1], m[4], m[7], m[2], m[5], m[8]];
+  }
+
+  function mul3(a, b) {
+    const out = new Array(9).fill(0);
+    for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) {
+      for (let k = 0; k < 3; k++) out[3 * r + c] += a[3 * r + k] * b[3 * k + c];
+    }
+    return out;
+  }
+
+  const vrToRobot = [-1, 0, 0, 0, 0, 1, 0, 1, 0];
 
   function readGripPoses(frame) {
     let left = null;
@@ -378,21 +405,25 @@
   function sendArmPose(left, right, t) {
     const lb = left?.gamepad?.buttons || [];
     const rb = right?.gamepad?.buttons || [];
-    const gripPressed = (g) => !!g && (g.pressed || g.value > 0.5);
-    const poseFresh = (t - leftGripPoseAt) <= 120 && (t - rightGripPoseAt) <= 120;
-    const active = gripPressed(lb[1]) && gripPressed(rb[1]) && !!leftGripPose && !!rightGripPose && poseFresh;
+    // Quest/browser mappings differ, and operators commonly call both controls
+    // “扳机”. Accept either squeeze (index 1) or index trigger (index 0) as the
+    // two hand deadman. The gripper fields still carry the index-0 analog value.
+    const clutchPressed = (buttons) => {
+      const pressed = (button) => !!button && (button.pressed || Number(button.value || 0) >= 0.2);
+      return pressed(buttons[1]) || pressed(buttons[0]);
+    };
+    const leftActive = clutchPressed(lb) && !!leftGripPose && (t - leftGripPoseAt) <= 120;
+    const rightActive = clutchPressed(rb) && !!rightGripPose && (t - rightGripPoseAt) <= 120;
+    const active = leftActive || rightActive;
     const reanchor = armReanchorRequested && active;
     // Idle poses are pure overhead once the IK has been released, so send them only
     // while the clutch is squeezed plus one final packet to release it.
     if (!active && !armWasActive && !armReanchorRequested) return;
-    if (active !== armWasActive) {
-      const leftGrip = Number(lb[1]?.value || 0).toFixed(2);
-      const rightGrip = Number(rb[1]?.value || 0).toFixed(2);
-      logInput(active
-        ? `双 grip 已激活（左=${leftGrip} 右=${rightGrip}），开始归位/跟随`
-        : `双 grip 已释放（左=${leftGrip} 右=${rightGrip}），机械臂保持`);
+    if (leftActive !== armWasActiveSides.left || rightActive !== armWasActiveSides.right) {
+      logInput(`手臂 clutch 左=${leftActive ? '激活' : '释放'} 右=${rightActive ? '激活' : '释放'}`);
     }
     armWasActive = active;
+    armWasActiveSides = { left: leftActive, right: rightActive };
     if (reanchor) armReanchorRequested = false;
     send({
       type: 'arm_pose',
@@ -400,13 +431,31 @@
       // discards poses released in a burst after a network stall.
       client_time_ms: t + performance.timeOrigin,
       active,
+      left_active: leftActive,
+      right_active: rightActive,
       left: leftGripPose,
       right: rightGripPose,
       left_gripper: Number(lb[0]?.value || 0),
       right_gripper: Number(rb[0]?.value || 0),
       reanchor,
+      body_basis: bodyBasis,
     });
     if (reanchor) logInput('已发送重锚定：把当前双手姿态作为摇操起点');
+  }
+
+  function handleAlignment(left, t) {
+    const buttons = left?.gamepad?.buttons || [];
+    const [_, yIndex] = faceButtonIndices(buttons);
+    const y = !!buttons[yIndex] && (buttons[yIndex].pressed || Number(buttons[yIndex].value || 0) >= 0.5);
+    if (y && !prevY && headPose) {
+      const headYaw = yawMatrixFromPose(headPose);
+      if (headYaw) {
+        bodyBasis = mul3(vrToRobot, transpose3(headYaw));
+        armReanchorRequested = true;
+        logInput('Y：已完成身体方向对齐；下一次 clutch 将重新锚定');
+      }
+    }
+    prevY = y;
   }
 
   function faceButtonIndices(rb) {
@@ -478,7 +527,8 @@
     const { left, right } = readGripPoses(frame);
 
     if (pose && t - lastPoseSend > HEAD_POSE_PERIOD_MS) {
-      send({ type: 'head_pose', pose: poseArray(pose.transform) });
+      headPose = poseArray(pose.transform);
+      send({ type: 'head_pose', pose: headPose });
       lastPoseSend = t;
     }
 
@@ -486,6 +536,7 @@
     lastControlSend = t;
 
     const sticks = sendBaseFromSticks(left, right);
+    handleAlignment(left, t);
     sendArmPose(left, right, t);
     handleLiftButtons(right, t);
     logJoystick(sticks, t);
@@ -523,8 +574,9 @@
         // longer do it, and the server would otherwise hold the last commanded values
         // until the watchdog expires.
         if (armWasActive) {
-          send({ type: 'arm_pose', active: false, left: null, right: null });
+          send({ type: 'arm_pose', active: false, left_active: false, right_active: false, left: null, right: null });
           armWasActive = false;
+          armWasActiveSides = { left: false, right: false };
         }
         sendBase(0, 0, 0, true);
         status.textContent = 'VR ended';

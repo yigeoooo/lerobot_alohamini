@@ -334,6 +334,28 @@ def test_initial_reanchor_request_does_not_bypass_homing(arm_ik_module):
     assert ik.engage_reason == "homing"
 
 
+def test_update_can_latch_current_pose_without_runtime_homing(arm_ik_module):
+    """VR clutch engagement should follow the ROS2 measured-FK latch semantics."""
+    ik = arm_ik_module.AlohaMiniDualArmIK(
+        URDF_PATH,
+        fixed_dt=0.04,
+        home_before_engage=False,
+    )
+    state = _make_state(arm_ik_module)
+    payload = {
+        "active": True,
+        "left": _make_pose(),
+        "right": _make_pose(0.1),
+    }
+
+    out = ik.update(payload, state)
+
+    assert out
+    assert ik.active is True
+    assert ik.homing is False
+    assert ik.engage_reason is None
+
+
 def test_homing_command_accumulates_past_loaded_joint_deadband(arm_ik_module):
     ik = arm_ik_module.AlohaMiniDualArmIK(
         URDF_PATH,

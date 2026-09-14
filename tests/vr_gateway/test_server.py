@@ -104,6 +104,14 @@ def test_release_arm_pose_is_not_dropped_as_stale():
     )["status"] == "held"
 
 
+def test_base_and_lift_are_locked_while_arm_clutch_is_pending():
+    robot = _RobotStub()
+    gateway = VRGateway(robot, VRGatewayConfig(), arm_ik=_IKStub())
+    gateway.stage_message({"type": "arm_pose", "active": True, "left": _pose(), "right": _pose()})
+    assert gateway.stage_message({"type": "base", "x.vel": 1.0})["ignored"] == "arm_clutch"
+    assert gateway.stage_message({"type": "lift", "velocity": 100.0})["ignored"] == "arm_clutch"
+
+
 def test_encode_payload_converts_rgb_frame_to_bgr_before_jpeg(monkeypatch):
     class _Encoded:
         def tobytes(self):

@@ -390,6 +390,7 @@ class AlohaMiniDualArmIK:
         home_speed_deg_s: float = 20.0,
         home_tolerance_deg: float = 2.0,
         home_max_state_deviation_deg: float = 5.0,
+        home_before_engage: bool = True,
     ):
         """
         Args:
@@ -497,6 +498,7 @@ class AlohaMiniDualArmIK:
         )
         self.state_blend = float(np.clip(state_blend, 0.0, 1.0))
         self.active = False
+        self.active_sides: set[str] = set()
 
         home_posture = home_posture_deg if home_posture_deg is not None else DEFAULT_HOME_POSTURE_DEG
         unknown_home = {
@@ -512,6 +514,11 @@ class AlohaMiniDualArmIK:
         self.home_speed_deg_s = float(home_speed_deg_s)
         self.home_tolerance_deg = float(home_tolerance_deg)
         self.home_max_state_deviation_deg = float(home_max_state_deviation_deg)
+        # ROS2 Joy-Con teleop latches measured FK on clutch engage. Keep the
+        # legacy homing ramp available for callers that explicitly want it, but
+        # production VR can disable it so squeezing never drives the arm to a
+        # preset midpoint before tracking starts.
+        self.home_before_engage = bool(home_before_engage)
         self._homing = False
         self._homing_command_deg: dict[str, np.ndarray | None] = dict.fromkeys(SIDES)
         self._home_max_error_deg: float | None = None
@@ -610,6 +617,7 @@ class AlohaMiniDualArmIK:
         self._last_time: float | None = None
         self._warned_invalid_pose = False
         self._engage_reason: str | None = None
+        self._body_basis = VR_TO_ROBOT.copy()
 
     @staticmethod
     def required_state_keys() -> tuple[str, ...]:
@@ -745,7 +753,7 @@ class AlohaMiniDualArmIK:
             self._robot0[side],
             self._ctrl0[side],
             ctrl,
-            self._vr_to_robot,
+            self._body_basis,
             self.position_scale,
             self.orientation_scale,
         )
@@ -761,6 +769,7 @@ class AlohaMiniDualArmIK:
 
     def _reset(self) -> None:
         self.active = False
+        self.active_sides.clear()
         self._ctrl0 = dict.fromkeys(SIDES)
         self._robot0 = dict.fromkeys(SIDES)
         self._target = dict.fromkeys(SIDES)
@@ -861,11 +870,34 @@ class AlohaMiniDualArmIK:
             })
         self._last_time = time.monotonic()
         self.active = True
+        self.active_sides.update(SIDES)
         self._homing = False
         self._homing_command_deg = dict.fromkeys(SIDES)
         self._engage_reason = None
         self._home_max_error_deg = 0.0
         logger.info("VR IK engaged with fresh robot state")
+        return True
+
+    def _engage_side(self, side: str, pose: np.ndarray, state: dict[str, Any]) -> bool:
+        """Latch one arm from its measured joints and current controller pose."""
+        ok, reason = self._state_is_fresh_and_complete(state)
+        if not ok:
+            self._engage_reason = reason
+            return False
+        self._sync_lift_joint(state)
+        measured = self._state_to_urdf_deg(side, state)
+        self._write_joints(side, measured)
+        self._last_output[side] = measured
+        self.robot.update_kinematics()
+        self._robot0[side] = np.array(self.robot.get_T_world_frame(self.tip_frames[side]))
+        self._ctrl0[side] = pose.copy()
+        self._target[side] = self._robot0[side].copy()
+        self.posture_tasks[side].set_joints({
+            name: float(np.deg2rad(value))
+            for name, value in zip(self.joints[side][:3], measured[:3], strict=True)
+        })
+        self._engage_reason = None
+        self._home_max_error_deg = 0.0
         return True
 
     def reanchor(self, poses: dict[str, np.ndarray], state: dict[str, Any]) -> bool:
@@ -889,6 +921,8 @@ class AlohaMiniDualArmIK:
             self.robot.update_kinematics()
             converged = True
             for side in SIDES:
+                if side not in self.active_sides:
+                    continue
                 current = np.array(self.robot.get_T_world_frame(self.tip_frames[side]))
                 translation, rotation = pose_difference(current, self._target[side])
                 if translation > self.position_tolerance_m or rotation > self.orientation_tolerance_rad:
@@ -915,13 +949,36 @@ class AlohaMiniDualArmIK:
         unusable, or when the solve fails -- the gateway treats that as "hold".
         """
         state = state or {}
-        want = bool(payload.get("active")) and bool(payload.get("left")) and bool(payload.get("right"))
-        if not want:
+        raw_basis = payload.get("body_basis")
+        if raw_basis is not None:
+            try:
+                basis = np.asarray(raw_basis, dtype=float).reshape(3, 3)
+                if np.isfinite(basis).all() and np.isclose(np.linalg.det(basis), 1.0, atol=1e-3):
+                    self._body_basis = basis
+            except (TypeError, ValueError):
+                pass
+        legacy_active = bool(payload.get("active"))
+        per_side_mode = "left_active" in payload or "right_active" in payload
+        # Preserve the legacy all-or-nothing protocol semantics for older clients:
+        # an active packet without both poses is a transient drop and must hold.
+        if legacy_active and not per_side_mode and (not payload.get("left") or not payload.get("right")):
+            return {}
+        requested = {
+            side: bool(payload.get(f"{side}_active", legacy_active)) and bool(payload.get(side))
+            for side in SIDES
+        }
+        if not any(requested.values()):
             self._reset()
             return {}
 
+        # A released side must stop producing new targets immediately, while the
+        # other side keeps its clutch origin and continues independently.
+        self.active_sides.intersection_update({side for side, active in requested.items() if active})
+
         poses: dict[str, np.ndarray] = {}
         for side in SIDES:
+            if not requested[side]:
+                continue
             pose = pose_to_matrix(payload.get(side))
             if pose is None:
                 # Hold without touching any latched state: a dropped/garbled frame must
@@ -936,15 +993,20 @@ class AlohaMiniDualArmIK:
         reanchor_requested = bool(
             payload.get("reanchor") or payload.get("align") or payload.get("calibrate")
         )
-        if self.active and reanchor_requested:
-            if not self.reanchor(poses, state):
-                return {}
-        elif not self.active:
+        # A side is engaged independently. Re-anchor only the requested sides;
+        # releasing one hand never clears the other hand's origin.
+        if reanchor_requested and self.active_sides:
+            for side in list(self.active_sides & set(poses)):
+                self.active_sides.discard(side)
+                self._robot0[side] = None
+                self._ctrl0[side] = None
+                self._target[side] = None
+        if not self.active_sides:
             ok, reason = self._state_is_fresh_and_complete(state)
             if not ok:
                 self._engage_reason = reason
                 return {}
-            if self._homing or not self._is_at_home_posture(state):
+            if self.home_before_engage and (self._homing or not self._is_at_home_posture(state)):
                 # Ramp towards the verified home posture before latching a clutch
                 # reference, so every session starts from the same kinematic branch
                 # (see DEFAULT_HOME_POSTURE_DEG) instead of wherever the arm happened
@@ -957,8 +1019,12 @@ class AlohaMiniDualArmIK:
                 out = self._step_homing(state, homing_dt)
                 if self._homing:
                     return out if out is not None else {}
-            if not self._engage(poses, state):
-                return {}
+        for side in SIDES:
+            if requested[side] and side not in self.active_sides:
+                if not self._engage_side(side, poses[side], state):
+                    return {}
+                self.active_sides.add(side)
+        self.active = bool(self.active_sides)
 
         dt = self._tick_dt()
         # Keep Placo's integration and velocity constraints synchronized with the
@@ -977,6 +1043,8 @@ class AlohaMiniDualArmIK:
 
         # Seed the model from the last command, optionally corrected towards reality.
         for side in SIDES:
+            if side not in self.active_sides:
+                continue
             seed = self._last_output[side]
             measured = self._measured_urdf_deg(side, state)
             if self.state_blend > 0.0 and measured is not None:
@@ -985,6 +1053,14 @@ class AlohaMiniDualArmIK:
         self.robot.update_kinematics()
 
         for side in SIDES:
+            if side not in self.active_sides:
+                # Keep the inactive arm's frame task exactly at its current FK
+                # pose so Placo cannot use it as a free secondary objective while
+                # solving the engaged side.
+                self.tasks[side].T_world_frame = np.array(
+                    self.robot.get_T_world_frame(self.tip_frames[side])
+                )
+                continue
             candidate = self._target_from_delta(side, poses[side])
             if should_commit_target(candidate, self._target[side], self.deadband_m, self.deadband_rad):
                 self._target[side] = candidate
@@ -1005,6 +1081,8 @@ class AlohaMiniDualArmIK:
 
         solution: dict[str, np.ndarray] = {}
         for side in SIDES:
+            if side not in self.active_sides:
+                continue
             raw = self._read_joints(side)
             if not np.isfinite(raw).all():
                 logger.warning("VR IK produced a non-finite solution for %s arm; holding", side)
@@ -1029,6 +1107,8 @@ class AlohaMiniDualArmIK:
 
         out: dict[str, float] = {}
         for side in SIDES:
+            if side not in self.active_sides:
+                continue
             self._last_output[side] = solution[side]
             for name, value in zip(ARM_JOINTS, self._urdf_deg_to_robot_deg(solution[side]), strict=True):
                 out[f"arm_{side}_{name}.pos"] = float(value)
