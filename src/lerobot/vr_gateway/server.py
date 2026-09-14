@@ -32,6 +32,18 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+# Feetech degree commands for the two proximal pitch joints increase opposite to
+# the URDF axes.  Keep this transform at the hardware boundary so IK output follows
+# the same convention as the AlohaMini robot driver.
+ALOHAMINI_ROBOT_TO_URDF_JOINT_SIGNS = {
+    "shoulder_pan": 1.0,
+    "shoulder_lift": -1.0,
+    "elbow_flex": -1.0,
+    "wrist_flex": 1.0,
+    "wrist_yaw": 1.0,
+    "wrist_roll": 1.0,
+}
+
 BASE_VELOCITY_KEYS = ("x.vel", "y.vel", "theta.vel")
 LIFT_HEIGHT_KEY = "lift_axis.height_mm"
 LIFT_VELOCITY_KEY = "lift_axis.vel"
@@ -822,7 +834,16 @@ def main() -> None:  # pragma: no cover - CLI convenience
             f"AlohaMini 2 Pro URDF is required at {urdf}; sync src/lerobot/vr_gateway/assets "
             "to the Raspberry Pi before starting the VR gateway."
         )
-    arm_ik = AlohaMiniDualArmIK(urdf)
+    arm_ik = AlohaMiniDualArmIK(
+        urdf,
+        joint_signs=ALOHAMINI_ROBOT_TO_URDF_JOINT_SIGNS,
+        # Match the validated ROS2 DLS tuning: conservative speed, half scale,
+        # and a small measured-state correction to avoid open-loop drift.
+        smooth=1.0,
+        position_scale=0.5,
+        max_joint_speed_deg_s=90.0,
+        state_blend=0.1,
+    )
     gateway_config = VRGatewayConfig(
         camera_name="forward",
         control_hz=args.control_hz,

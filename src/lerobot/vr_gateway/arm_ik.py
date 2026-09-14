@@ -358,7 +358,7 @@ class AlohaMiniDualArmIK:
     def __init__(
         self,
         urdf_path: str | Path,
-        smooth: float = 0.7,
+        smooth: float = 1.0,
         max_step_deg: float | None = None,
         *,
         position_scale: float = 0.5,
@@ -371,7 +371,7 @@ class AlohaMiniDualArmIK:
         solver_iterations: int = 20,
         position_tolerance_m: float = 5e-4,
         orientation_tolerance_rad: float = 5e-3,
-        max_joint_speed_deg_s: float = 180.0,
+        max_joint_speed_deg_s: float = 90.0,
         max_state_deviation_deg: float | None = 45.0,
         joint_limits_deg: dict[str, tuple[float, float]] | None = None,
         deadband_m: float = 0.0015,
@@ -380,7 +380,7 @@ class AlohaMiniDualArmIK:
         min_dt: float = 0.005,
         max_dt: float = 0.2,
         fixed_dt: float | None = None,
-        state_blend: float = 0.0,
+        state_blend: float = 0.1,
         tip_frame_template: str = "{side}_Moving_Jaw",
         vr_to_robot: np.ndarray | None = None,
         joint_signs: dict[str, float] | None = None,
@@ -953,6 +953,7 @@ class AlohaMiniDualArmIK:
                 self._homing = True
                 self._engage_reason = "homing"
                 homing_dt = self._tick_dt()
+                self.solver.dt = float(homing_dt)
                 out = self._step_homing(state, homing_dt)
                 if self._homing:
                     return out if out is not None else {}
@@ -960,6 +961,10 @@ class AlohaMiniDualArmIK:
                 return {}
 
         dt = self._tick_dt()
+        # Keep Placo's integration and velocity constraints synchronized with the
+        # actual gateway period. A fixed solver step turns scheduling/serial jitter
+        # into inconsistent Cartesian speed and catch-up jumps on hardware.
+        self.solver.dt = float(dt)
         smoothing = rate_compensated_smoothing(self.smooth, dt, self.nominal_dt)
         max_delta_deg = self.max_joint_speed_deg_s * dt
         if self.max_step_deg is not None:
