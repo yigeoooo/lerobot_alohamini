@@ -46,7 +46,7 @@ PY
 conda activate lerobot_alohamini
 adb reverse --remove-all
 adb reverse tcp:8000 tcp:8000
-python -m lerobot.vr_gateway.server --robot-model alohamini2pro --host 0.0.0.0 --port 8000
+python -m lerobot.vr_gateway.server --robot-model alohamini2pro --host 0.0.0.0 --port 8000 --diagnostics true
 ```
 
 ## 上线前检查表

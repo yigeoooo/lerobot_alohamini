@@ -8,9 +8,8 @@ which is always ``RANGE_0_100``).
 Coordinate conventions used throughout:
 
 * WebXR reference space: ``+x`` right, ``+y`` up, ``-z`` forward (away from the user).
-* AlohaMini ``base_link`` (verified against the URDF: ``front_camera`` sits at
-  ``y = -0.055``, ``left_Base`` at ``x = +0.187``): ``-y`` forward, ``+x`` left,
-  ``+z`` up.
+* AlohaMini ``base_link`` as used by the installed follower: ``+y`` is forward,
+  ``+x`` is left, and ``+z`` is up.
 
 Both the clutch reference and the live controller pose live in the *same* WebXR
 reference space, so relative motion is composed in that shared world frame and then
@@ -19,7 +18,9 @@ rotated once into the robot base frame by :data:`VR_TO_ROBOT`.
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import os
 import tempfile
 import time
 import xml.etree.ElementTree as ET
@@ -31,6 +32,10 @@ import numpy as np
 from lerobot.utils.import_utils import require_package
 
 logger = logging.getLogger(__name__)
+
+
+def _diagnostics_enabled() -> bool:
+    return os.environ.get("LEROBOT_VR_DIAGNOSTICS", "").strip().lower() in {"1", "true", "yes", "on"}
 
 SIDES: tuple[str, str] = ("left", "right")
 
@@ -94,7 +99,8 @@ DEFAULT_HOME_POSTURE_DEG: dict[str, dict[str, float]] = {
 # left_Base sits at x = +0.187 and right_Base at x = -0.187), so:
 #   vr +x (right)    -> robot -x (right is the robot's -x, since its +x is left)
 #   vr +y (up)       -> robot +z (up)
-#   vr -z (forward)  -> robot -y (forward, since the robot's +y is backward)
+#   vr -z (forward)  -> robot -y in the proper rotation basis; the translation
+#                       direction correction below then maps it to physical +y forward.
 # det(+1), so this is a proper rotation.
 VR_TO_ROBOT: np.ndarray = np.array(
     [
@@ -104,6 +110,12 @@ VR_TO_ROBOT: np.ndarray = np.array(
     ],
     dtype=float,
 )
+
+# The installed follower's physical forward direction is opposite the historical
+# CAD/WebXR translation convention along the controller's local Z axis. Apply this
+# correction to translations only; keeping ``VR_TO_ROBOT`` a proper rotation is
+# required for orientation retargeting and Placo's SO(3) tasks.
+VR_TRANSLATION_DIRECTION: np.ndarray = np.diag([1.0, 1.0, -1.0])
 
 
 # --------------------------------------------------------------------------------------
@@ -248,7 +260,7 @@ def compose_target(
     rotation_delta = scale_rotation(rotation_delta, orientation_scale)
 
     target = np.eye(4)
-    target[:3, 3] = home[:3, 3] + position_scale * (basis @ position_delta)
+    target[:3, 3] = home[:3, 3] + position_scale * (basis @ (VR_TRANSLATION_DIRECTION @ position_delta))
     # Re-project onto SO(3): the solver is handed this matrix directly, and a chain of
     # products must not be allowed to drift off the manifold.
     target[:3, :3] = orthonormalize((basis @ rotation_delta @ basis.T) @ home[:3, :3])
@@ -836,10 +848,8 @@ class AlohaMiniDualArmIK:
             # last commanded rather than snapping them shut/open.
             gripper_key = f"arm_{side}_gripper.pos"
             if gripper_key in state:
-                try:
+                with contextlib.suppress(TypeError, ValueError):
                     out[gripper_key] = float(state[gripper_key])
-                except (TypeError, ValueError):
-                    pass
         self._homing = not at_home
         self._home_max_error_deg = max_error_deg
         return out
@@ -949,6 +959,35 @@ class AlohaMiniDualArmIK:
         unusable, or when the solve fails -- the gateway treats that as "hold".
         """
         state = state or {}
+        if _diagnostics_enabled():
+            pose_summary = {
+                side: {
+                    "position": payload.get(side, {}).get("position")
+                    if isinstance(payload.get(side), dict)
+                    else None,
+                    "orientation": payload.get(side, {}).get("orientation")
+                    if isinstance(payload.get(side), dict)
+                    else None,
+                }
+                for side in SIDES
+            }
+            fact_joints = {
+                key: state[key]
+                for key in self.required_state_keys()
+                if key in state
+            }
+            logger.info(
+                "[VR-DIAG] input active=%s left_active=%s right_active=%s body_basis=%s "
+                "poses=%s fact_joints=%s",
+                bool(payload.get("active")),
+                bool(payload.get("left_active", payload.get("active"))),
+                bool(payload.get("right_active", payload.get("active"))),
+                np.asarray(payload.get("body_basis", self._body_basis), dtype=float)
+                .round(5)
+                .tolist(),
+                pose_summary,
+                fact_joints,
+            )
         raw_basis = payload.get("body_basis")
         if raw_basis is not None:
             try:
@@ -1121,4 +1160,22 @@ class AlohaMiniDualArmIK:
                 trigger = 0.0
             # Gripper motors are RANGE_0_100 regardless of use_degrees.
             out[f"arm_{side}_gripper.pos"] = float(np.clip(trigger, 0.0, 1.0) * 100.0)
+            if _diagnostics_enabled():
+                fk = np.array(self.robot.get_T_world_frame(self.tip_frames[side]))
+                target = self._target[side]
+                measured = self._measured_urdf_deg(side, state)
+                logger.info(
+                    "[VR-DIAG] output side=%s target_tcp_xyz=%s fk_tcp_xyz=%s "
+                    "target_minus_fk_m=%s fact_joints_deg=%s command_joints_deg=%s",
+                    side,
+                    np.asarray(target[:3, 3]).round(6).tolist(),
+                    np.asarray(fk[:3, 3]).round(6).tolist(),
+                    np.asarray(target[:3, 3] - fk[:3, 3]).round(6).tolist(),
+                    np.asarray(
+                        self._urdf_deg_to_robot_deg(measured if measured is not None else solution[side])
+                    )
+                    .round(3)
+                    .tolist(),
+                    np.asarray(self._urdf_deg_to_robot_deg(solution[side])).round(3).tolist(),
+                )
         return out

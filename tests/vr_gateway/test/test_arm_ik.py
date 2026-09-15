@@ -219,8 +219,9 @@ def test_robot_basis_maps_vr_up_to_robot_positive_z(arm_ik_module):
 
 
 def test_robot_basis_maps_vr_forward_to_robot_forward(arm_ik_module):
-    """vr forward is -z; the robot's own forward is -y, so vr -z must map to robot -y."""
-    np.testing.assert_allclose(arm_ik_module.VR_TO_ROBOT @ np.array([0.0, 0.0, -1.0]), [0.0, -1.0, 0.0])
+    """The effective installed-follower translation maps VR forward to robot +y."""
+    effective = arm_ik_module.VR_TO_ROBOT @ arm_ik_module.VR_TRANSLATION_DIRECTION
+    np.testing.assert_allclose(effective @ np.array([0.0, 0.0, -1.0]), [0.0, 1.0, 0.0])
 
 
 def test_smoothing_deadband_and_joint_rate_limit_are_pure_and_accumulative(arm_ik_module):

@@ -171,7 +171,7 @@ def test_compose_target_applies_relative_delta_from_origin(arm_ik_module):
     current = np.eye(4)
     current[:3, 3] = [0.6, 0.7, 0.8]
     target = arm_ik_module.compose_target(home, origin, current, np.eye(3), position_scale=0.5)
-    np.testing.assert_allclose(target[:3, 3], [0.65, 0.05, 0.95])
+    np.testing.assert_allclose(target[:3, 3], [0.65, 0.05, 0.45])
     np.testing.assert_allclose(target[:3, :3], np.eye(3))
 
 
@@ -203,7 +203,9 @@ def test_compose_target_maps_translation_and_rotation_through_robot_basis(arm_ik
     current[:3, 3] = [0.1, 0.2, 0.3]
 
     target = arm_ik_module.compose_target(home, origin, current, basis, position_scale=0.5)
-    np.testing.assert_allclose(target[:3, 3], home[:3, 3] + 0.5 * basis @ current[:3, 3])
+    np.testing.assert_allclose(
+        target[:3, 3], home[:3, 3] + 0.5 * basis @ (arm_ik_module.VR_TRANSLATION_DIRECTION @ current[:3, 3])
+    )
     np.testing.assert_allclose(target[:3, :3], basis @ basis.T)
 
 
@@ -219,8 +221,9 @@ def test_robot_basis_maps_vr_up_to_robot_positive_z(arm_ik_module):
 
 
 def test_robot_basis_maps_vr_forward_to_robot_forward(arm_ik_module):
-    """vr forward is -z; the robot's own forward is -y, so vr -z must map to robot -y."""
-    np.testing.assert_allclose(arm_ik_module.VR_TO_ROBOT @ np.array([0.0, 0.0, -1.0]), [0.0, -1.0, 0.0])
+    """The effective installed-follower translation maps VR forward to robot +y."""
+    effective = arm_ik_module.VR_TO_ROBOT @ arm_ik_module.VR_TRANSLATION_DIRECTION
+    np.testing.assert_allclose(effective @ np.array([0.0, 0.0, -1.0]), [0.0, 1.0, 0.0])
 
 
 def test_smoothing_deadband_and_joint_rate_limit_are_pure_and_accumulative(arm_ik_module):

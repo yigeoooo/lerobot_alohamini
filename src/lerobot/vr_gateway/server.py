@@ -23,6 +23,7 @@ import base64
 import contextlib
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,16 +33,32 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# Feetech degree commands for the two proximal pitch joints increase opposite to
-# the URDF axes.  Keep this transform at the hardware boundary so IK output follows
-# the same convention as the AlohaMini robot driver.
+
+def _diagnostics_enabled() -> bool:
+    return os.environ.get("LEROBOT_VR_DIAGNOSTICS", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _parse_bool(value: str | bool) -> bool:
+    """Parse a human-friendly CLI boolean such as ``true`` or ``false``."""
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"invalid boolean value: {value!r}; use true or false")
+
+# Feetech degree commands for joints whose encoder direction differs from the URDF
+# axes. The wrist-roll encoder direction is inverted on both arms per the installed
+# ROS2 hardware calibration.
 ALOHAMINI_ROBOT_TO_URDF_JOINT_SIGNS = {
     "shoulder_pan": 1.0,
     "shoulder_lift": -1.0,
     "elbow_flex": -1.0,
     "wrist_flex": 1.0,
     "wrist_yaw": 1.0,
-    "wrist_roll": 1.0,
+    "wrist_roll": -1.0,
 }
 
 BASE_VELOCITY_KEYS = ("x.vel", "y.vel", "theta.vel")
@@ -275,6 +292,18 @@ class VRGateway:
             action.update(dict.fromkeys(BASE_VELOCITY_KEYS, 0.0))
             action[LIFT_VELOCITY_KEY] = 0.0
             action.pop(LIFT_HEIGHT_KEY, None)
+        if _diagnostics_enabled():
+            arm_action = {
+                key: value
+                for key, value in sorted(action.items())
+                if key.startswith("arm_") and key.endswith(".pos")
+            }
+            logger.info(
+                "[VR-DIAG] sent_action arm_joints=%s lift=%s base=%s",
+                arm_action,
+                action.get(LIFT_VELOCITY_KEY),
+                {key: action.get(key) for key in BASE_VELOCITY_KEYS},
+            )
         result = self.robot.send_action(action)
         self.stats.actions_sent += 1
         if mark_activity:
@@ -538,6 +567,23 @@ class VRGateway:
     def _arm_updates(self, payload: dict[str, Any]) -> dict[str, float]:
         """Run the IK for one pose, counting and reporting rejections."""
         state = self._state()
+        if _diagnostics_enabled():
+            fact_joints = {
+                key: state[key]
+                for key in sorted(state)
+                if key.startswith("arm_") and key.endswith(".pos")
+            }
+            logger.info(
+                "[VR-DIAG] gateway_arm_payload active=%s left_active=%s right_active=%s "
+                "left=%s right=%s fact_joints=%s lift_height_mm=%s",
+                bool(payload.get("active")),
+                bool(payload.get("left_active", payload.get("active"))),
+                bool(payload.get("right_active", payload.get("active"))),
+                payload.get("left"),
+                payload.get("right"),
+                fact_joints,
+                state.get(LIFT_HEIGHT_KEY),
+            )
         try:
             if hasattr(self.arm_ik, "update"):
                 updates = self.arm_ik.update(payload, state)
@@ -815,13 +861,15 @@ def main() -> None:  # pragma: no cover - CLI convenience
 
     import uvicorn
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    from lerobot.robots.alohamini.alohamini import AlohaMini
-    from lerobot.robots.alohamini.config_alohamini import AlohaMiniConfig
-
-    from .arm_ik import AlohaMiniDualArmIK
-
     parser = argparse.ArgumentParser(description="Serve AlohaMini VR teleoperation over WebSocket")
+    parser.add_argument(
+        "--diagnostics",
+        nargs="?",
+        const=True,
+        default=False,
+        type=_parse_bool,
+        help="print controller, measured-joint, FK, IK, and sent-action diagnostics (true/false)",
+    )
     parser.add_argument(
         "--robot-model", default="alohamini2pro", choices=["alohamini1", "alohamini2", "alohamini2pro"]
     )
@@ -837,6 +885,13 @@ def main() -> None:  # pragma: no cover - CLI convenience
     parser.add_argument("--max-frame-width", type=int, default=VRGatewayConfig.max_frame_width)
     parser.add_argument("--max-pose-age-s", type=float, default=VRGatewayConfig.max_pose_age_s)
     args = parser.parse_args()
+    os.environ["LEROBOT_VR_DIAGNOSTICS"] = "1" if args.diagnostics else "0"
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    from lerobot.robots.alohamini.alohamini import AlohaMini
+    from lerobot.robots.alohamini.config_alohamini import AlohaMiniConfig
+
+    from .arm_ik import AlohaMiniDualArmIK
+
     robot_config = AlohaMiniConfig(
         id="AlohaMiniRobot",
         robot_model=args.robot_model,
