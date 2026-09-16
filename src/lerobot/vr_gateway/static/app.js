@@ -1,131 +1,156 @@
 (() => {
   'use strict';
 
-  // ---------------------------------------------------------------- constants
-
-  // The browser must not out-run the robot's serial buses. The gateway coalesces
-  // whatever arrives, but sending faster than it can flush only adds queueing delay.
-  const CONTROL_PERIOD_MS = 40;   // 25 Hz arm/base cadence
-  const HEAD_POSE_PERIOD_MS = 100;
-  // Base packets are sent on change only; this keepalive keeps the server watchdog
-  // (1 s by default) fed while the joystick sits at rest.
+  const CONTROL_PERIOD_MS = 40;
   const BASE_KEEPALIVE_MS = 400;
-  // Diagnostics only: rate-limit so button probing cannot flood the control path.
   const CONTROLLER_DIAG_MS = 250;
   const AXIS_DEAD_ZONE = 0.15;
-  const BASE_LINEAR_SCALE = 0.30;   // m/s at full stick
-  const BASE_ANGULAR_SCALE = 60;    // deg/s at full stick
+  const BASE_LINEAR_SCALE = 0.30;
+  const BASE_ANGULAR_SCALE = 60;
   const LIFT_JOG_VELOCITY = 1300;
-
-  // ------------------------------------------------------------------- helpers
-
   const $ = (id) => document.getElementById(id);
   const status = $('status');
   const image = $('view');
-  const inputLog = $('input-log');
-
+  const scene = document.querySelector('a-scene');
   const inputHistory = [];
+  let ws;
+  let health = null;
+  let healthAt = 0;
+  let cameraAt = 0;
+  let videoRotation = 0;
+  let limitWarning = '';
+  let xrSession = null;
+  let headPose = null;
+  let headPoseAt = 0;
+  let lastControlSend = 0;
+  let lastBaseSent = null;
+  let lastBaseSentAt = 0;
+  let lastDiagSend = 0;
+  let buttonSignature = '';
+  let prevA = false;
+  let prevB = false;
+  let prevY = false;
+  let liftCommand = 0;
+  let lastLiftSend = 0;
+  const hands = Object.fromEntries(['left', 'right'].map((side) => [side, {
+    pose: null, active: false, grip: false, epoch: 0, trigger: null, triggerArmed: false, source: null,
+  }]));
 
   function logInput(message) {
-    const line = `${new Date().toLocaleTimeString()} ${message}`;
     console.info(`[VR] ${message}`);
-    inputHistory.push(line);
+    inputHistory.push(`${new Date().toLocaleTimeString()} ${message}`);
     if (inputHistory.length > 8) inputHistory.shift();
-    if (inputLog) inputLog.textContent = inputHistory.join('\n');
+    $('input-log').textContent = inputHistory.join('\n');
   }
-
-  // --------------------------------------------------------------- connection
-
-  let ws;
-  const wsUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
 
   function send(message) {
-    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message));
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+    ws.send(JSON.stringify(message));
+    return true;
   }
 
-  function onServerMessage(event) {
-    let message;
-    try {
-      message = JSON.parse(event.data);
-    } catch (_) {
-      return;
+  function showDisconnected(text) {
+    health = null;
+    showLimitWarnings([]);
+    status.textContent = text;
+    for (const side of ['left', 'right']) {
+      $(`${side}-state`).textContent = '状态未知';
+      $(`${side}-state`).dataset.following = 'false';
+      $(`${side}-detail`).textContent = '连接未知 · 力矩未知';
     }
-    if (message.jpeg_b64) image.src = 'data:image/jpeg;base64,' + message.jpeg_b64;
-    if (message.type === 'error') {
-      status.textContent = message.error;
-      logInput(`服务器错误：${message.error}`);
-      return;
-    }
-    // The server no longer acks every packet; an ack that does arrive means something
-    // was refused or degraded, so it is worth showing to the operator.
-    if (message.type === 'ack' && message.for) {
-      const detail = message.ignored ? `ignored:${message.ignored}` : (message.status || '');
-      status.textContent = `connected · ${message.for}${detail ? ' · ' + detail : ''}`;
-      if (message.ignored || message.status === 'rejected' || message.status === 'stale') {
-        logInput(`指令被拒绝：${message.for} ${detail}`);
-      } else if (message.status === 'reanchored') {
-        logInput('重锚定完成：当前姿态已作为起点');
-      }
-    }
-    if (message.type === 'status') reportStatus(message);
+    $('feedback-state').textContent = '反馈不可用';
+    $('mapping-state').textContent = '标定待检查';
+    drawHUD();
   }
 
-  let lastReportedRejects = 0;
-  let lastReportedStale = 0;
+  function showLimitWarnings(warnings) {
+    const names = { shoulder_pan: '肩部转向', shoulder_lift: '肩部抬升', elbow_flex: '肘关节',
+      wrist_flex: '腕俯仰', wrist_yaw: '腕偏航', wrist_roll: '腕滚转' };
+    const groups = ['left', 'right'].map((side) => {
+      const joints = warnings.filter((warning) => warning.side === side).map((warning) => names[warning.joint] || warning.joint);
+      return joints.length ? `${side === 'left' ? '左臂' : '右臂'} ${joints.join('、')}` : '';
+    }).filter(Boolean);
+    const next = groups.length ? `限位警告：${groups.join('；')}` : '';
+    if (next && next !== limitWarning) logInput(next);
+    limitWarning = next;
+    $('limit-warning').textContent = next;
+    $('limit-warning').hidden = !next;
+    $('limit-plane').setAttribute('visible', !!next);
+    const canvas = $('limit-texture');
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    if (next) {
+      ctx.fillStyle = '#713f12';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = '#fff7d6';
+      ctx.font = 'bold 36px sans-serif';
+      ctx.fillText('限位警告', 24, 42);
+      ctx.font = '28px sans-serif';
+      groups.forEach((text, index) => ctx.fillText(text, 24, 86 + index * 38, 976));
+    }
+    dirtyTexture('limit-plane');
+  }
 
   function reportStatus(message) {
-    const parts = [];
-    if (message.estop) parts.push('急停中');
-    if (message.arm_frozen) parts.push('手臂保持');
-    if (message.calibrated) parts.push('校准标志');
-    if (message.arm_pending_reanchor) parts.push('等待重锚定');
-    if (message.arm_homing) {
-      const error = Number(message.arm_home_max_error_deg);
-      parts.push(Number.isFinite(error) ? `机械臂归位中 ${error.toFixed(1)}°` : '机械臂归位中');
-    } else if (message.arm_ik_active) {
-      parts.push('机械臂跟随中');
-    } else if (message.arm_engage_reason) {
-      parts.push(`原因:${message.arm_engage_reason}`);
+    health = message;
+    healthAt = performance.now();
+    showLimitWarnings(message.feedback_fresh ? message.joint_limit_warnings || [] : []);
+    const torque = { enabled: '力矩已使能', disabled: '力矩未使能', mixed: '部分力矩使能', unknown: '力矩未知' };
+    const reason = {
+      tracking_lost: '追踪丢失，请松开再握持', stale_pose: '输入过期，请松开再握持',
+      stale_feedback: '反馈过期，请松开再握持', input_or_feedback_timeout: '输入或反馈超时，请松开再握持',
+      new_connection: '请松开 Grip 后开始', disconnected: '请松开再握持',
+      watchdog: '通信超时，请松开再握持', paused: '已暂停，请松开再握持', estop: '急停后请松开再握持',
+    };
+    status.textContent = message.estop ? '急停中' : message.arm_frozen ? '跟随已暂停' :
+      message.robot_connected ? '机器人已连接' : '机器人未连接';
+    $('clutch').textContent = message.arm_frozen ? '恢复跟随' : '暂停跟随';
+    for (const side of ['left', 'right']) {
+      const arm = message.arms?.[side];
+      const following = arm?.state === 'following' && !message.estop && !message.arm_frozen;
+      $(`${side}-state`).textContent = following ? '跟随中' : '保持';
+      $(`${side}-state`).dataset.following = String(following);
+      $(`${side}-detail`).textContent = `${arm?.connected ? '已连接' : '未连接'} · ${torque[arm?.torque] || torque.unknown}` +
+        (arm?.reason ? ` · ${reason[arm.reason] || arm.reason}` : '');
     }
-    if (!message.ik_available) parts.push('IK 不可用');
-    status.textContent = `connected${parts.length ? ' · ' + parts.join(' · ') : ''}`;
-    // Surface IK rejections: previously the arm just stopped tracking in silence.
-    if (message.ik_rejected > lastReportedRejects) {
-      logInput(`IK 拒绝了 ${message.ik_rejected - lastReportedRejects} 个手臂姿态（累计 ${message.ik_rejected}）`);
-      lastReportedRejects = message.ik_rejected;
-    }
-    if (message.poses_stale > lastReportedStale) {
-      logInput(`丢弃了 ${message.poses_stale - lastReportedStale} 个过期姿态（网络延迟）`);
-      lastReportedStale = message.poses_stale;
-    }
+    $('mapping-state').textContent = message.arm_ik_mode === 'legacy'
+      ? '旧版平移 · 独立拧腕 · 无需 Home 校准'
+      : (message.arm_mapping_loaded ? '机械标定已加载' : '机械标定不可用');
+    $('feedback-state').textContent = message.feedback_fresh ? `反馈 ${Math.round(message.feedback_age_ms)} ms` : '反馈过期';
+    $('diagnostics').textContent = `IK ${message.ik_available ? '可用' : '不可用'} · 已发送 ${message.actions_sent} · ` +
+      `拒绝 ${message.ik_rejected} · 过期 ${message.poses_stale} · 总线 ${message.action_ms} ms · 控制 ${message.control_hz_actual ?? '—'} Hz · 页面 vr5`;
+    $('tcp-info').textContent = `TCP: ${Object.values(message.tcp_frames || {}).join(' / ') || '未知'}`;
+    drawHUD();
   }
 
   function connect() {
-    ws = new WebSocket(wsUrl);
+    ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
     ws.onopen = () => {
-      status.textContent = 'connected';
-      send({ type: 'hello', client: 'webxr' });
+      lastBaseSent = null;
+      for (const hand of Object.values(hands)) { hand.epoch++; hand.trigger = null; hand.triggerArmed = false; }
+      status.textContent = '网关已连接，等待机器人状态';
+      send({ type: 'hello', client: 'webxr', protocol: 3 });
     };
-    ws.onclose = () => {
-      status.textContent = 'disconnected';
-      setTimeout(connect, 1000);
+    ws.onclose = (event) => {
+      showDisconnected(event.code === 1008 ? '已有其他操作员连接' : '网关连接已断开');
+      if (event.code !== 1008) setTimeout(connect, 1000);
     };
-    ws.onerror = () => {
-      status.textContent = 'connection error';
+    ws.onerror = () => showDisconnected('网关连接错误');
+    ws.onmessage = (event) => {
+      let message;
+      try { message = JSON.parse(event.data); } catch (_) { return; }
+      if (message.jpeg_b64) image.src = 'data:image/jpeg;base64,' + message.jpeg_b64;
+      if (message.type === 'status') reportStatus(message);
+      if (message.type === 'error') { status.textContent = message.error; logInput(message.error); }
+      if (message.type === 'ack' && (message.ignored || ['rejected', 'stale', 'ik_unavailable', 'unbound'].includes(message.status))) {
+        const reason = message.reason === 'head_tracking_required' ? '请保持头部追踪并面向前方后握持' :
+          message.ignored || message.reason || message.status;
+        logInput(`指令未执行：${message.for} · ${reason}`);
+      }
     };
-    ws.onmessage = onServerMessage;
   }
 
-  connect();
-
-  // -------------------------------------------------------------- base packets
-
-  let lastBaseSent = null;
-  let lastBaseSentAt = 0;
-
-  // Send base velocity only when it changes, plus a slow keepalive. A packet every
-  // frame costs the gateway a full send_action over the motor buses for no new
-  // information, which is bus time the arms need.
+  // Base and lift mappings, units, dead zone and cadence match the existing gateway.
   function sendBase(xVel, yVel, thetaVel, force) {
     const now = performance.now();
     const changed = !lastBaseSent
@@ -138,44 +163,9 @@
     send({ type: 'base', 'x.vel': xVel, 'y.vel': yVel, 'theta.vel': thetaVel });
   }
 
-  // ------------------------------------------------------------- 2D UI bindings
-
-  $('estop').onclick = () => send({ type: 'estop', enabled: true });
-  $('reset-estop').onclick = () => send({ type: 'estop', enabled: false });
-  $('calibrate').onclick = () => send({ type: 'calibrate', enabled: true });
-
-  $('reanchor').onclick = () => {
-    armReanchorRequested = true;
-    logInput('请求重锚定：下一次双手 grip 会以当前姿态作为起点');
-    status.textContent = 'waiting re-anchor';
-  };
-
-  // "Clutch" is now an explicit arm freeze: off (the default) means the arms follow the
-  // controller grips, on means arm poses are ignored while the base still drives.
-  let armFrozen = false;
-  const clutchButton = $('clutch');
-  clutchButton.textContent = 'Hold arms: off';
-  clutchButton.onclick = () => {
-    armFrozen = !armFrozen;
-    clutchButton.textContent = `Hold arms: ${armFrozen ? 'on' : 'off'}`;
-    send({ type: 'clutch', enabled: armFrozen });
-    logInput(armFrozen ? '手臂保持中（忽略手柄姿态）' : '手臂恢复跟随');
-  };
-
-  $('lift').oninput = (e) => {
-    $('lift-value').textContent = `${e.target.value} mm`;
-    send({ type: 'lift', height_mm: Number(e.target.value) });
-  };
-
-  $('gripper').oninput = (e) => {
-    $('gripper-value').textContent = `${Math.round(Number(e.target.value) * 100)}%`;
-    send({ type: 'gripper', value: Number(e.target.value) });
-  };
-
   const joy = $('joystick');
   const stick = joy.querySelector('.stick');
   let joyActive = false;
-
   function joyMove(ev) {
     if (!joyActive) return;
     const rect = joy.getBoundingClientRect();
@@ -184,19 +174,13 @@
     stick.style.transform = `translate(${x * 35}px,${y * 35}px)`;
     sendBase(-y * BASE_LINEAR_SCALE, -x * BASE_LINEAR_SCALE, 0);
   }
-
-  joy.onpointerdown = (e) => {
-    joyActive = true;
-    joy.setPointerCapture(e.pointerId);
-    joyMove(e);
-  };
+  joy.onpointerdown = (e) => { joyActive = true; joy.setPointerCapture(e.pointerId); joyMove(e); };
   joy.onpointermove = joyMove;
-  joy.onpointerup = () => {
+  joy.onpointerup = joy.onpointercancel = () => {
     joyActive = false;
     stick.style.transform = '';
     sendBase(0, 0, 0, true);
   };
-
   window.onkeydown = (e) => {
     const velocity = { w: [0.2, 0, 0], s: [-0.2, 0, 0], a: [0, 0, 0.8], d: [0, 0, -0.8] }[e.key.toLowerCase()];
     if (velocity && !e.repeat) sendBase(velocity[0], velocity[1], velocity[2], true);
@@ -204,194 +188,107 @@
   window.onkeyup = (e) => {
     if ('wasd'.includes(e.key.toLowerCase())) sendBase(0, 0, 0, true);
   };
-
-  // ------------------------------------------------------------- XR renderer
-
-  let xrSession, xrRefSpace, xrGl, xrProgram, xrTexture, xrPosBuffer, xrUvBuffer;
-  let frameCanvas, frameCtx;
-
-  function initXRRenderer() {
-    const canvas = $('xr-canvas');
-    xrGl = canvas.getContext('webgl', { xrCompatible: true }) || canvas.getContext('webgl2', { xrCompatible: true });
-    if (!xrGl) throw new Error('WebGL XR unavailable');
-    const gl = xrGl;
-
-    const vs = gl.createShader(gl.VERTEX_SHADER);
-    gl.shaderSource(vs, 'attribute vec2 p; attribute vec2 uv; varying vec2 v; void main(){gl_Position=vec4(p,0.,1.);v=uv;}');
-    gl.compileShader(vs);
-
-    const fs = gl.createShader(gl.FRAGMENT_SHADER);
-    gl.shaderSource(fs, 'precision mediump float; varying vec2 v; uniform sampler2D tex; void main(){gl_FragColor=texture2D(tex,v);}');
-    gl.compileShader(fs);
-
-    xrProgram = gl.createProgram();
-    gl.attachShader(xrProgram, vs);
-    gl.attachShader(xrProgram, fs);
-    gl.linkProgram(xrProgram);
-
-    xrPosBuffer = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, xrPosBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
-
-    xrUvBuffer = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, xrUvBuffer);
-    // The forward camera is mounted upside-down relative to the Quest headset.
-    // Invert both texture axes so the immersive view is rotated clockwise by 180 degrees.
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([1, 0, 0, 0, 1, 1, 0, 1]), gl.STATIC_DRAW);
-
-    xrTexture = gl.createTexture();
-    gl.bindTexture(gl.TEXTURE_2D, xrTexture);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-
-    frameCanvas = document.createElement('canvas');
-    frameCanvas.width = 640;
-    frameCanvas.height = 480;
-    frameCtx = frameCanvas.getContext('2d');
+  $('lift').oninput = (e) => {
+    $('lift-value').textContent = `${e.target.value} mm`;
+    send({ type: 'lift', height_mm: Number(e.target.value) });
+  };
+  for (const side of ['left', 'right']) {
+    $(`${side}-gripper`).oninput = (e) => send({ type: 'gripper', side, value: Number(e.target.value) });
   }
-
-  function drawXR(frame, pose) {
-    const gl = xrGl;
-    const layer = xrSession?.renderState?.baseLayer;
-    if (!gl || !layer || !pose) return;
-
-    if (image.complete && image.naturalWidth) {
-      frameCtx.drawImage(image, 0, 0, frameCanvas.width, frameCanvas.height);
-      gl.bindTexture(gl.TEXTURE_2D, xrTexture);
-      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, frameCanvas);
+  $('estop').onclick = () => send({ type: 'estop', enabled: true });
+  $('reset-estop').onclick = () => send({ type: 'estop', enabled: false });
+  $('clutch').onclick = () => {
+    if (health) send({ type: 'clutch', enabled: !health.arm_frozen });
+  };
+  $('reanchor').onclick = () => { send({ type: 'reanchor' }); logInput('已请求重建当前锚点'); };
+  function align() {
+    if (!headPose || performance.now() - headPoseAt > 120) {
+      logInput('请在 VR 中面向操作方向后按 Y 对齐');
+      return;
     }
-
-    gl.bindFramebuffer(gl.FRAMEBUFFER, layer.framebuffer);
-    gl.useProgram(xrProgram);
-
-    const p = gl.getAttribLocation(xrProgram, 'p');
-    const u = gl.getAttribLocation(xrProgram, 'uv');
-    const tex = gl.getUniformLocation(xrProgram, 'tex');
-
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, xrTexture);
-    gl.uniform1i(tex, 0);
-    gl.bindBuffer(gl.ARRAY_BUFFER, xrPosBuffer);
-    gl.enableVertexAttribArray(p);
-    gl.vertexAttribPointer(p, 2, gl.FLOAT, false, 0, 0);
-    gl.bindBuffer(gl.ARRAY_BUFFER, xrUvBuffer);
-    gl.enableVertexAttribArray(u);
-    gl.vertexAttribPointer(u, 2, gl.FLOAT, false, 0, 0);
-
-    // Preserve the camera aspect ratio in each eye viewport. Rendering the
-    // 4:3 camera frame into the full (usually wider) eye rectangle stretches
-    // it on Quest; letterbox instead and clear the unused area to black.
-    const iw = image.naturalWidth || 4;
-    const ih = image.naturalHeight || 3;
-    const imageAspect = iw / ih;
-
-    for (const view of pose.views) {
-      const vp = layer.getViewport(view);
-      const viewportAspect = vp.width / vp.height;
-      let w = vp.width;
-      let h = vp.height;
-      if (viewportAspect > imageAspect) w = Math.round(vp.height * imageAspect);
-      else h = Math.round(vp.width / imageAspect);
-      const x = vp.x + Math.floor((vp.width - w) / 2);
-      const y = vp.y + Math.floor((vp.height - h) / 2);
-      gl.enable(gl.SCISSOR_TEST);
-      gl.scissor(vp.x, vp.y, vp.width, vp.height);
-      gl.clearColor(0, 0, 0, 1);
-      gl.clear(gl.COLOR_BUFFER_BIT);
-      gl.disable(gl.SCISSOR_TEST);
-      gl.viewport(x, y, w, h);
-      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-    }
+    send({ type: 'align', head: headPose, client_time_ms: performance.timeOrigin + performance.now() });
+    logInput('已请求朝向对齐并重建锚点');
   }
-
-  // -------------------------------------------------------------- XR input loop
-
-  let leftGripPose = null;
-  let rightGripPose = null;
-  let leftGripPoseAt = 0;
-  let rightGripPoseAt = 0;
-  let headPose = null;
-  let bodyBasis = null;
-  let lastPoseSend = 0;
-  let lastControlSend = 0;
-  let lastDiagSend = 0;
-  let armWasActive = false;
-  let armWasActiveSides = { left: false, right: false };
-  let armReanchorRequested = false;
-  let buttonSignature = '';
-  let joystickWasActive = false;
-  let lastJoystickLog = 0;
-  let prevA = false;
-  let prevB = false;
-  let prevY = false;
-  let liftCommand = 0;
-  let lastLiftSend = 0;
+  $('align').onclick = align;
+  $('settings').onclick = () => {
+    $('position-scale').value = health?.arm_settings?.position_scale ?? 0.5;
+    $('joint-speed').value = health?.arm_settings?.max_joint_speed_deg_s ?? 90;
+    $('video-rotation').value = String(videoRotation);
+    $('settings-dialog').showModal();
+  };
+  $('settings-close').onclick = () => $('settings-dialog').close();
+  $('settings-form').onsubmit = (event) => {
+    event.preventDefault();
+    videoRotation = Number($('video-rotation').value) === 180 ? 180 : 0;
+    drawVideo();
+    if (send({ type: 'arm_settings', position_scale: Number($('position-scale').value),
+      max_joint_speed_deg_s: Number($('joint-speed').value) })) $('settings-dialog').close();
+  };
 
   function poseArray(p) {
-    if (!p) return null;
-    return {
-      position: [p.position.x, p.position.y, p.position.z],
-      orientation: [p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w],
-    };
+    return { position: [p.position.x, p.position.y, p.position.z],
+      orientation: [p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w] };
   }
-
-  function yawMatrixFromPose(pose) {
-    if (!pose?.orientation) return null;
-    const [x, y, z, w] = pose.orientation;
-    const yaw = Math.atan2(2 * (w * y + x * z), 1 - 2 * (y * y + z * z));
-    const c = Math.cos(yaw);
-    const s = Math.sin(yaw);
-    return [c, 0, s, 0, 1, 0, -s, 0, c];
-  }
-
-  function transpose3(m) {
-    return [m[0], m[3], m[6], m[1], m[4], m[7], m[2], m[5], m[8]];
-  }
-
-  function mul3(a, b) {
-    const out = new Array(9).fill(0);
-    for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) {
-      for (let k = 0; k < 3; k++) out[3 * r + c] += a[3 * r + k] * b[3 * k + c];
-    }
-    return out;
-  }
-
-  const vrToRobot = [-1, 0, 0, 0, 0, 1, 0, 1, 0];
-
-  function readGripPoses(frame) {
-    let left = null;
-    let right = null;
-    let nextLeftPose = null;
-    let nextRightPose = null;
+  const pressed = (button, threshold = 0.2) => !!button && (button.pressed || Number(button.value || 0) >= threshold);
+  function readHands(frame, refSpace) {
+    for (const hand of Object.values(hands)) { hand.source = null; hand.pose = null; }
     for (const src of xrSession.inputSources) {
-      if (src.handedness === 'left') left = src;
-      if (src.handedness === 'right') right = src;
-      if (!src.gripSpace) continue;
-      const sp = frame.getPose(src.gripSpace, xrRefSpace);
-      if (!sp) continue;
-      const pose = poseArray(sp.transform);
-      if (src.handedness === 'left') nextLeftPose = pose;
-      if (src.handedness === 'right') nextRightPose = pose;
+      const hand = hands[src.handedness];
+      if (!hand) continue;
+      hand.source = src;
+      const pose = src.gripSpace && frame.getPose(src.gripSpace, refSpace);
+      if (pose && !pose.emulatedPosition) hand.pose = poseArray(pose.transform);
     }
-    // Never keep a pose from an earlier frame when WebXR temporarily cannot
-    // resolve gripSpace; otherwise it gets a fresh packet timestamp and looks
-    // like a valid new command to the gateway.
-    const now = performance.now();
-    leftGripPose = nextLeftPose;
-    rightGripPose = nextRightPose;
-    leftGripPoseAt = nextLeftPose ? now : 0;
-    rightGripPoseAt = nextRightPose ? now : 0;
-    return { left, right };
+    let changed = false;
+    for (const [side, hand] of Object.entries(hands)) {
+      // A disconnected controller cannot prove that Grip was released.
+      const grip = hand.source ? pressed(hand.source.gamepad?.buttons[1]) : hand.grip;
+      const active = grip && !!hand.pose;
+      if (hand.active !== active || hand.grip !== grip) { hand.epoch++; changed = true; }
+      hand.grip = grip;
+      hand.active = active;
+      const model = $(`${side}-model`);
+      model.object3D.visible = !!hand.pose;
+      if (hand.pose) {
+        model.object3D.position.fromArray(hand.pose.position);
+        model.object3D.quaternion.fromArray(hand.pose.orientation);
+      }
+      model.querySelector('.grip-indicator').setAttribute('color', active ? '#49d1b0' : '#73849e');
+      model.querySelector('.trigger-indicator').setAttribute('color', pressed(hand.source?.gamepad?.buttons[0]) ? '#f6b858' : '#73849e');
+    }
+    return changed;
   }
-
+  function sendArmPose(t) {
+    send({ type: 'arm_pose', client_time_ms: t + performance.timeOrigin,
+      auto_align: true, head: headPose && t - headPoseAt <= 120 ? headPose : null,
+      active: hands.left.grip || hands.right.grip,
+      left_active: hands.left.grip, right_active: hands.right.grip,
+      left_epoch: hands.left.epoch, right_epoch: hands.right.epoch,
+      left: hands.left.pose, right: hands.right.pose });
+    for (const [side, hand] of Object.entries(hands)) {
+      const value = Number(hand.source?.gamepad?.buttons[0]?.value || 0);
+      if (!hand.pose || !health?.feedback_fresh || health?.arm_frozen || health?.estop) {
+        hand.trigger = null; hand.triggerArmed = false; continue;
+      }
+      // A tracked, released trigger means closed. Pressure opens the gripper;
+      // transport values remain closure fractions for desktop/calibrated clients.
+      if (hand.trigger !== null && Math.abs(value - hand.trigger) >= 0.01) {
+        hand.triggerArmed = true;
+        hand.trigger = value;
+      } else if (hand.trigger === null) {
+        hand.trigger = value;
+        hand.triggerArmed = true;
+      }
+      // Repeat an intentional target while tracked: the driver may accept only
+      // one bounded step per tick. Do not latch an unclipped target on the server.
+      if (hand.triggerArmed) send({ type: 'gripper', side, value: 1 - hand.trigger,
+        client_time_ms: t + performance.timeOrigin });
+    }
+  }
   function sendBaseFromSticks(left, right) {
     const la = left?.gamepad?.axes || [];
     const ra = right?.gamepad?.axes || [];
     const dz = (v) => (Math.abs(v) < AXIS_DEAD_ZONE ? 0 : v);
-    // xr-standard puts the thumbstick on axes 2/3; older mappings use 0/1.
     const lx = la.length >= 4 ? la[2] : la[0];
     const ly = la.length >= 4 ? la[3] : la[1];
     const rx = ra.length >= 4 ? ra[2] : ra[0];
@@ -399,198 +296,164 @@
     const yVel = -dz(lx || 0) * BASE_LINEAR_SCALE;
     const thetaVel = -dz(rx || 0) * BASE_ANGULAR_SCALE;
     sendBase(xVel, yVel, thetaVel);
-    return { lx: lx || 0, ly: ly || 0, rx: rx || 0, xVel, yVel, thetaVel };
   }
-
-  function sendArmPose(left, right, t) {
-    const lb = left?.gamepad?.buttons || [];
-    const rb = right?.gamepad?.buttons || [];
-    // Quest/browser mappings differ, and operators commonly call both controls
-    // “扳机”. Accept either squeeze (index 1) or index trigger (index 0) as the
-    // two hand deadman. The gripper fields still carry the index-0 analog value.
-    const clutchPressed = (buttons) => {
-      const pressed = (button) => !!button && (button.pressed || Number(button.value || 0) >= 0.2);
-      return pressed(buttons[1]) || pressed(buttons[0]);
-    };
-    const leftActive = clutchPressed(lb) && !!leftGripPose && (t - leftGripPoseAt) <= 120;
-    const rightActive = clutchPressed(rb) && !!rightGripPose && (t - rightGripPoseAt) <= 120;
-    const active = leftActive || rightActive;
-    const reanchor = armReanchorRequested && active;
-    // Idle poses are pure overhead once the IK has been released, so send them only
-    // while the clutch is squeezed plus one final packet to release it.
-    if (!active && !armWasActive && !armReanchorRequested) return;
-    if (leftActive !== armWasActiveSides.left || rightActive !== armWasActiveSides.right) {
-      logInput(`手臂 clutch 左=${leftActive ? '激活' : '释放'} 右=${rightActive ? '激活' : '释放'}`);
-    }
-    armWasActive = active;
-    armWasActiveSides = { left: leftActive, right: rightActive };
-    if (reanchor) armReanchorRequested = false;
-    send({
-      type: 'arm_pose',
-      // Client-sampled timestamp: the server measures relative delay from it and
-      // discards poses released in a burst after a network stall.
-      client_time_ms: t + performance.timeOrigin,
-      active,
-      left_active: leftActive,
-      right_active: rightActive,
-      left: leftGripPose,
-      right: rightGripPose,
-      left_gripper: Number(lb[0]?.value || 0),
-      right_gripper: Number(rb[0]?.value || 0),
-      reanchor,
-      body_basis: bodyBasis,
-    });
-    if (reanchor) logInput('已发送重锚定：把当前双手姿态作为摇操起点');
-  }
-
-  function handleAlignment(left, t) {
-    const buttons = left?.gamepad?.buttons || [];
-    const [_, yIndex] = faceButtonIndices(buttons);
-    const y = !!buttons[yIndex] && (buttons[yIndex].pressed || Number(buttons[yIndex].value || 0) >= 0.5);
-    if (y && !prevY && headPose) {
-      const headYaw = yawMatrixFromPose(headPose);
-      if (headYaw) {
-        bodyBasis = mul3(vrToRobot, transpose3(headYaw));
-        armReanchorRequested = true;
-        logInput('Y：已完成身体方向对齐；下一次 clutch 将重新锚定');
-      }
-    }
-    prevY = y;
-  }
-
   function faceButtonIndices(rb) {
-    // Oculus Touch layouts vary: xr-standard commonly exposes A/B at 4/5,
-    // while some Quest browsers expose a compact 5-button array at 3/4.
     if (rb.length >= 6) return [4, 5];
     if (rb.length >= 5) return [3, 4];
     return [0, 1];
   }
-
   function handleLiftButtons(right, t) {
     const rb = right?.gamepad?.buttons || [];
     const pressed = (button) => !!button && (button.pressed || button.value > 0.5);
     const [aIndex, bIndex] = faceButtonIndices(rb);
     const a = pressed(rb[aIndex]);
     const b = pressed(rb[bIndex]);
-
     const signature = Array.from(rb, (button, index) =>
       `${index}:${button.pressed ? 'down' : 'up'}:${Number(button.value || 0).toFixed(2)}`).join(' ');
-    // Diagnostics only: send on change and no faster than CONTROLLER_DIAG_MS so button
-    // probing never competes with arm poses for bus time. Leaving buttonSignature stale
-    // when the rate limit blocks means the next frame retries.
     if (signature !== buttonSignature && t - lastDiagSend > CONTROLLER_DIAG_MS) {
       buttonSignature = signature;
       lastDiagSend = t;
-      logInput(`右手柄按钮 ${signature || '(none)'} | A=${aIndex} B=${bIndex}`);
-      if (right?.gamepad) {
-        send({ type: 'controller_pose', hand: 'right', buttons: Array.from(rb, (button) => button.value) });
-      }
+      if (right?.gamepad) send({ type: 'controller_pose', hand: 'right', buttons: Array.from(rb, (button) => button.value) });
     }
-
-    // The lift servo latches its goal velocity, so send only on change instead of
-    // re-issuing the same jog command at the frame rate.
     const desired = a && !b ? -LIFT_JOG_VELOCITY : (b && !a ? LIFT_JOG_VELOCITY : 0);
-    // Refresh a held jog periodically: the lift driver treats velocity as a
-    // watchdog-style command on some firmware, so a one-shot packet can stop
-    // before the operator releases the button.
     if (desired !== liftCommand || (desired !== 0 && t - lastLiftSend >= 200)) {
       liftCommand = desired;
       lastLiftSend = t;
       send({ type: 'lift', velocity: desired, button: desired < 0 ? 'A' : (desired > 0 ? 'B' : 'release') });
     }
-
     if (a !== prevA) logInput(`右手柄 A ${a ? '按下' : '释放'}（下降）`);
     if (b !== prevB) logInput(`右手柄 B ${b ? '按下' : '释放'}（上升）`);
     prevA = a;
     prevB = b;
   }
 
-  function logJoystick(sticks, t) {
-    const moving = Math.abs(sticks.xVel) > 0.001 || Math.abs(sticks.yVel) > 0.001 || Math.abs(sticks.thetaVel) > 0.001;
-    if (moving && (!joystickWasActive || t - lastJoystickLog > 500)) {
-      logInput(`摇杆 L(${sticks.lx.toFixed(2)},${sticks.ly.toFixed(2)}) R(${sticks.rx.toFixed(2)}) → base ` +
-        `x=${sticks.xVel.toFixed(2)} y=${sticks.yVel.toFixed(2)} θ=${sticks.thetaVel.toFixed(1)}`);
-      lastJoystickLog = t;
-    } else if (!moving && joystickWasActive) {
-      logInput('摇杆释放 → 底盘停止');
-    }
-    joystickWasActive = moving;
-  }
-
-  function onXRFrame(t, frame) {
-    if (!xrSession) return;
-    xrSession.requestAnimationFrame(onXRFrame);
-
-    const pose = frame.getViewerPose(xrRefSpace);
-    if (pose) drawXR(frame, pose);
-
-    const { left, right } = readGripPoses(frame);
-
-    if (pose && t - lastPoseSend > HEAD_POSE_PERIOD_MS) {
-      headPose = poseArray(pose.transform);
-      send({ type: 'head_pose', pose: headPose });
-      lastPoseSend = t;
-    }
-
-    if (t - lastControlSend <= CONTROL_PERIOD_MS) return;
+  // A-Frame owns the XR session and render loop. Input remains raw WebXR data;
+  // model rendering never contributes a second coordinate transform.
+  function onXRFrame(t, frame, refSpace) {
+    if (xrSession.visibilityState && xrSession.visibilityState !== 'visible') return;
+    const viewer = frame.getViewerPose(refSpace);
+    headPose = viewer ? poseArray(viewer.transform) : null;
+    headPoseAt = viewer ? t : 0;
+    const edge = readHands(frame, refSpace);
+    if (t - lastControlSend <= CONTROL_PERIOD_MS && !edge) return;
     lastControlSend = t;
-
-    const sticks = sendBaseFromSticks(left, right);
-    handleAlignment(left, t);
-    sendArmPose(left, right, t);
+    const left = hands.left.source;
+    const right = hands.right.source;
+    sendBaseFromSticks(left, right);
+    const lb = left?.gamepad?.buttons || [];
+    const y = pressed(lb[faceButtonIndices(lb)[1]], 0.5);
+    if (y && !prevY) align();
+    prevY = y;
+    sendArmPose(t);
     handleLiftButtons(right, t);
-    logJoystick(sticks, t);
   }
 
-  // ------------------------------------------------------------ session control
-
-  $('vr').onclick = async () => {
-    if (!navigator.xr) {
-      status.textContent = 'WebXR unavailable';
-      return;
+  function dirtyTexture(id) {
+    const map = $(id).getObject3D('mesh')?.material?.map;
+    if (map) map.needsUpdate = true;
+  }
+  function drawVideo() {
+    if (!image.naturalWidth || !image.naturalHeight) return;
+    const canvas = $('video-texture');
+    // Rotate pixels in one place. The plane itself stays upright, avoiding
+    // accumulated canvas/mesh rotations; the desktop source image is unchanged.
+    if (canvas.width !== image.naturalWidth || canvas.height !== image.naturalHeight) {
+      // Three.js allocates GPU storage for the texture's original dimensions.
+      // needsUpdate alone does not resize that storage. Quest then rejects the
+      // canvas upload (glCopySubTextureCHROMIUM: destination bad dimensions).
+      // Release it before resizing so the next render allocates the new size.
+      $('video-plane').getObject3D('mesh')?.material?.map?.dispose();
+      canvas.width = image.naturalWidth;
+      canvas.height = image.naturalHeight;
     }
-    try {
-      if (navigator.xr.isSessionSupported && !(await navigator.xr.isSessionSupported('immersive-vr'))) {
-        status.textContent = 'immersive-vr unsupported';
-        return;
-      }
-      xrSession = await navigator.xr.requestSession('immersive-vr', {
-        optionalFeatures: ['local-floor', 'bounded-floor'],
-      });
-      initXRRenderer();
-      if (xrGl.makeXRCompatible) await xrGl.makeXRCompatible();
-      if (typeof XRWebGLLayer !== 'undefined') {
-        xrSession.updateRenderState({ baseLayer: new XRWebGLLayer(xrSession, xrGl) });
-      }
-      xrSession.onend = () => {
-        xrSession = null;
-        xrGl = null;
-        leftGripPose = null;
-        rightGripPose = null;
-        leftGripPoseAt = 0;
-        rightGripPoseAt = 0;
-        armReanchorRequested = false;
-        // Release the arm clutch and stop the base: the frame loop is gone and can no
-        // longer do it, and the server would otherwise hold the last commanded values
-        // until the watchdog expires.
-        if (armWasActive) {
-          send({ type: 'arm_pose', active: false, left_active: false, right_active: false, left: null, right: null });
-          armWasActive = false;
-          armWasActiveSides = { left: false, right: false };
-        }
-        sendBase(0, 0, 0, true);
-        status.textContent = 'VR ended';
-      };
-      xrRefSpace = await xrSession.requestReferenceSpace('local-floor')
-        .catch(() => xrSession.requestReferenceSpace('local'));
-      status.textContent = 'VR active';
-      xrSession.requestAnimationFrame(onXRFrame);
-    } catch (e) {
-      status.textContent = `VR failed: ${e.message}`;
-      try {
-        if (xrSession) await xrSession.end();
-      } catch (_) { /* session already gone */ }
-      xrSession = null;
+    const ctx = canvas.getContext('2d');
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    if (videoRotation === 180) {
+      ctx.translate(canvas.width, canvas.height);
+      ctx.rotate(Math.PI);
     }
+    ctx.drawImage(image, 0, 0);
+    ctx.restore();
+    const height = 1.6 * canvas.height / canvas.width;
+    $('video-plane').setAttribute('height', height);
+    $('hud-plane').setAttribute('position', `0 ${-height / 2 - 0.17} -1.5`);
+    $('limit-plane').setAttribute('position', `0 ${height / 2 - 0.14} -1.49`);
+    dirtyTexture('video-plane');
+  }
+  image.onload = () => {
+    cameraAt = performance.now();
+    $('camera-state').textContent = `实时画面 ${image.naturalWidth} × ${image.naturalHeight}`;
+    drawVideo();
   };
+  function drawHUD() {
+    const canvas = $('hud-texture');
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#14223bed';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = health?.estop ? '#ff8c97' : '#e4edf7';
+    ctx.font = '28px sans-serif';
+    ctx.fillText(status.textContent, 24, 45);
+    ctx.font = '24px sans-serif';
+    ctx.fillText(`左臂 ${$('left-state').textContent}    右臂 ${$('right-state').textContent}    ${$('feedback-state').textContent}`, 24, 90);
+    ctx.fillStyle = '#a9bdd4';
+    ctx.font = '21px sans-serif';
+    ctx.fillStyle = limitWarning ? '#fbbf24' : '#a9bdd4';
+    ctx.fillText(limitWarning || 'Grip 自动对齐并跟随 · Trigger 夹爪 · A 下降 / B 上升', 24, 140, 976);
+    dirtyTexture('hud-plane');
+  }
+  if (window.AFRAME) {
+    AFRAME.registerComponent('teleop-input', {
+      tick() {
+        const xr = this.el.renderer?.xr;
+        const frame = xr?.getFrame();
+        if (xrSession && frame) onXRFrame(performance.now(), frame, xr.getReferenceSpace());
+      },
+    });
+  }
+  function releaseXRArms() {
+    for (const hand of Object.values(hands)) {
+      hand.pose = null; hand.active = false; hand.grip = false;
+      hand.trigger = null; hand.triggerArmed = false; hand.epoch++;
+    }
+    sendArmPose(performance.now());
+  }
+  scene.addEventListener('enter-vr', () => {
+    xrSession = scene.renderer.xr.getSession();
+    document.body.classList.add('vr-active');
+    $('vr-state').textContent = 'VR 已进入';
+    $('vr').textContent = '退出 VR';
+    xrSession?.addEventListener('visibilitychange', () => {
+      if (xrSession.visibilityState !== 'visible') releaseXRArms();
+    });
+    scene.renderer.xr.getReferenceSpace()?.addEventListener('reset', () => {
+      send({ type: 'reanchor' });
+    });
+  });
+  scene.addEventListener('exit-vr', () => {
+    xrSession = null;
+    headPose = null;
+    releaseXRArms();
+    sendBase(0, 0, 0, true);
+    document.body.classList.remove('vr-active');
+    $('vr-state').textContent = 'VR 已退出';
+    $('vr').textContent = '进入 VR';
+  });
+  $('vr').onclick = async () => {
+    try {
+      if (xrSession) { await scene.exitVR(); return; }
+      if (!navigator.xr || !await navigator.xr.isSessionSupported('immersive-vr')) {
+        throw new Error('当前浏览器不支持 immersive-vr');
+      }
+      await scene.enterVR();
+    } catch (error) { status.textContent = `VR 无法进入：${error.message}`; }
+  };
+  setInterval(() => {
+    if (health && performance.now() - healthAt > 2500) showDisconnected('网关状态已过期');
+    if (cameraAt && performance.now() - cameraAt > 1500) $('camera-state').textContent = '画面已过期';
+  }, 500);
+  drawHUD();
+  connect();
 })();

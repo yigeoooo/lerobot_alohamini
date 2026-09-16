@@ -350,6 +350,14 @@ class AlohaMini(Robot):
         self.left_bus.connect()
         if self.right_bus:
             self.right_bus.connect()
+        if self.config.require_calibration_match and not self.is_calibrated:
+            if self.right_bus:
+                self.right_bus.disconnect(disable_torque=False)
+            self.left_bus.disconnect(disable_torque=False)
+            raise ValueError(
+                "EEPROM calibration differs from the current LeRobot JSON. "
+                "Restore the matching motor calibration JSON or recalibrate motor ranges before startup."
+            )
         if not self.is_calibrated and calibrate:
             logger.info(
                 "Mismatch between calibration values in the motor and the calibration file or no calibration file found"

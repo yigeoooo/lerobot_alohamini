@@ -1,0 +1,552 @@
+/* Telegrip's light desktop / dark gradient card design, adapted for AlohaMini.
+ * Telegrip copyright (c) 2025 Emil Rofors, MIT: vendor/telegrip-LICENSE.txt. */
+
+:root {
+  color-scheme: light;
+  font-family: Inter,-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans-serif;
+  color: #202f44;
+  background: #f4f6f9;
+  font-synthesis: none;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+}
+
+main {
+  max-width: 1320px;
+  margin: 0 auto;
+  padding: 40px 32px 20px;
+  position: relative;
+  z-index: 2;
+  background: #f4f6f9;
+}
+
+h1,h2,h3,p {
+  margin: 0;
+}
+
+h1 {
+  font-size: 30px;
+  letter-spacing: -1px;
+}
+
+h1 span {
+  display: block;
+  font-size: 14px;
+  font-weight: 400;
+  letter-spacing: 0;
+  color: #6a778b;
+  margin-top: 10px;
+}
+
+h2 {
+  font-size: 18px;
+}
+
+h3 {
+  font-size: 15px;
+  margin: 12px 0 7px;
+}
+
+.eyebrow {
+  font-size: 11px;
+  letter-spacing: 2px;
+  font-weight: 700;
+  color: #71849a;
+  margin-bottom: 10px;
+}
+
+.page-header,.card-heading,.camera-footer,.health-row,.emergency-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.page-header {
+  margin-bottom: 30px;
+}
+
+.workspace {
+  display: grid;
+  grid-template-columns: 1.5fr 1fr;
+  gap: 22px;
+}
+
+.card,.camera-card,.status-card {
+  border-radius: 18px;
+  overflow: hidden;
+}
+
+.card {
+  background: #fff;
+  border: 1px solid #e4e8ee;
+  padding: 26px;
+  margin-top: 22px;
+}
+
+.camera-card,.status-card {
+  background: linear-gradient(135deg,#0f3460,#1a1a2e);
+  color: #f0f5fa;
+  box-shadow: 0 8px 22px #13284416;
+}
+
+.camera-card {
+  display: flex;
+  flex-direction: column;
+}
+
+.limit-warning {
+  position: fixed;
+  z-index: 1000;
+  top: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: max-content;
+  max-width: calc(100vw - 32px);
+  padding: 16px 24px;
+  border: 2px solid #fbbf24;
+  border-radius: 12px;
+  background: #713f12;
+  color: #fff7d6;
+  box-shadow: 0 8px 30px #0006;
+  pointer-events: none;
+  font-weight: 700;
+}
+
+.card-heading {
+  margin-bottom: 20px;
+}
+
+.camera-card .card-heading {
+  padding: 22px 24px 0;
+}
+
+.card-heading span,.camera-footer {
+  font-size: 12px;
+  color: #bacbdd;
+}
+
+.camera-view {
+  background: #080e17;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  min-height: 280px;
+}
+
+#view {
+  display: block;
+  width: 100%;
+  max-height: 480px;
+  object-fit: contain;
+  min-height: 100px;
+}
+
+.camera-footer {
+  padding: 14px 24px;
+  letter-spacing: 1px;
+}
+
+.status-card {
+  padding: 24px;
+}
+
+#status {
+  font-size: 13px;
+  line-height: 1.6;
+  color: #c8d7e7;
+  min-height: 42px;
+  margin-bottom: 15px;
+}
+
+.arm-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.arm-grid article {
+  background: #ffffff0c;
+  border: 1px solid #ffffff16;
+  padding: 16px;
+  border-radius: 12px;
+}
+
+.arm-label {
+  font-size: 11px;
+  color: #a9bdd4;
+  letter-spacing: 1px;
+}
+
+.arm-grid strong {
+  display: block;
+  font-size: 23px;
+  font-weight: 600;
+  margin: 10px 0;
+}
+
+.arm-grid p {
+  font-size: 11px;
+  line-height: 1.6;
+  color: #b3c4d6;
+}
+
+.arm-grid strong[data-following="true"] {
+  color: #73e4b7;
+}
+
+.health-row {
+  font-size: 11px;
+  color: #b3c4d6;
+  margin: 18px 0;
+}
+
+button,input,select {
+  font: inherit;
+}
+
+button {
+  border: 0;
+  border-radius: 9px;
+  padding: 12px 15px;
+  font-size: 13px;
+  font-weight: 600;
+  background: #ffffff14;
+  color: inherit;
+  cursor: pointer;
+  transition: background .15s;
+}
+
+button:hover {
+  filter: brightness(1.08);
+  background: #ffffff24;
+}
+
+button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible {
+  outline: 3px solid #4cbeb4;
+  outline-offset: 3px;
+}
+
+button:disabled {
+  opacity: .5;
+  cursor: not-allowed;
+}
+
+.primary {
+  background: #49d1b0;
+  color: #102e31;
+  font-size: 15px;
+  padding: 15px;
+}
+
+.primary:hover {
+  background: #6edfc2;
+}
+
+.wide {
+  width: 100%;
+}
+
+.secondary {
+  background: #e5eaf1;
+  color: #30445e;
+}
+
+.secondary:hover {
+  background: #d7e0eb;
+}
+
+.button-row {
+  display: flex;
+  gap: 7px;
+  margin: 10px 0 18px;
+}
+
+.button-row button {
+  flex: 1;
+  padding: 12px 5px;
+  font-size: 12px;
+}
+
+.emergency-row {
+  border-top: 1px solid #ffffff1c;
+  padding-top: 18px;
+  gap: 12px;
+}
+
+.danger {
+  background: #c34250;
+  color: white;
+  flex: 1;
+}
+
+.danger:hover {
+  background: #dc4b5b;
+}
+
+.outline {
+  border: 1px solid #ffffff30;
+  background: transparent;
+  font-size: 12px;
+}
+
+.muted {
+  color: #6a778b;
+  font-size: 13px;
+  line-height: 1.7;
+  margin-top: 8px;
+}
+
+.instruction-grid {
+  display: grid;
+  grid-template-columns: repeat(4,1fr);
+  gap: 28px;
+  margin-top: 28px;
+}
+
+.instruction-grid p {
+  font-size: 13px;
+  line-height: 1.8;
+  color: #68768a;
+}
+
+kbd {
+  display: inline-block;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  background: #eef2f7;
+  border: 1px solid #dce3ed;
+  border-radius: 6px;
+  padding: 6px 10px;
+}
+
+.manual {
+  display: flex;
+  gap: 32px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.manual h2 {
+  font-size: 17px;
+}
+
+.joystick {
+  width: 110px;
+  height: 110px;
+  border-radius: 50%;
+  background: #edf1f6;
+  border: 1px solid #dde4ed;
+  position: relative;
+  touch-action: none;
+  flex-shrink: 0;
+}
+
+.stick {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  background: #506e91;
+  position: absolute;
+  left: 35px;
+  top: 35px;
+  box-shadow: 0 3px 9px #30465c20;
+}
+
+.lift-control {
+  min-width: 200px;
+  flex: 1;
+  font-size: 13px;
+}
+
+.lift-control output {
+  float: right;
+  color: #6a778b;
+}
+
+input[type=range] {
+  width: 100%;
+  accent-color: #368d84;
+  margin-top: 18px;
+}
+
+.gripper-controls {
+  width: 190px;
+  font-size: 12px;
+}
+
+.gripper-controls label {
+  display: block;
+  margin: 10px 0;
+}
+
+.gripper-controls input {
+  margin-top: 8px;
+}
+
+.activity {
+  padding: 18px 24px;
+}
+
+summary {
+  cursor: pointer;
+  font-size: 13px;
+}
+
+#input-log {
+  font: 12px/1.8 ui-monospace,monospace;
+  white-space: pre-wrap;
+  max-height: 190px;
+  overflow: auto;
+  color: #576c85;
+}
+
+footer {
+  padding: 26px 0 4px;
+  text-align: center;
+  font-size: 11px;
+  color: #7f8d9f;
+}
+
+footer a {
+  color: inherit;
+}
+
+dialog {
+  border: 0;
+  border-radius: 18px;
+  padding: 28px;
+  max-width: 470px;
+  width: calc(100% - 32px);
+  color: #202f44;
+  box-shadow: 0 20px 100px #14203340;
+}
+
+dialog::backdrop {
+  background: #101b2e88;
+}
+
+dialog label {
+  display: block;
+  font-size: 13px;
+  margin-top: 22px;
+}
+
+dialog input,dialog select {
+  display: block;
+  width: 100%;
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid #d8e0eb;
+  border-radius: 7px;
+}
+
+dialog details {
+  font-size: 12px;
+  line-height: 1.8;
+  margin: 24px 0;
+}
+
+dialog details p {
+  margin-top: 10px;
+}
+
+a-scene {
+  position: fixed!important;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 0;
+}
+
+body.vr-active main {
+  visibility: hidden;
+}
+
+body.vr-active a-scene {
+  z-index: 5;
+}
+
+@media(max-width:1000px) {
+  .workspace {
+    grid-template-columns: 1fr 1fr;
+  }
+  .button-row {
+    flex-wrap: wrap;
+  }
+  .button-row button {
+    min-width: 90px;
+  }
+  .instruction-grid {
+    gap: 18px;
+  }
+  .manual {
+    gap: 22px;
+  }
+  .gripper-controls {
+    width: 100%;
+    display: flex;
+    gap: 24px;
+  }
+  .gripper-controls label {
+    flex: 1;
+  }
+}
+
+@media(max-width:720px) {
+  main {
+    padding: 24px 16px;
+  }
+  .page-header {
+    gap: 10px;
+  }
+  h1 {
+    font-size: 25px;
+  }
+  .workspace {
+    grid-template-columns: 1fr;
+  }
+  .camera-view {
+    min-height: 210px;
+  }
+  .status-card {
+    padding: 22px;
+  }
+  .instruction-grid {
+    grid-template-columns: 1fr 1fr;
+    gap: 24px;
+  }
+  .card {
+    padding: 22px;
+  }
+  .manual>div:first-child {
+    width: 100%;
+  }
+  .lift-control {
+    min-width: 140px;
+  }
+  .eyebrow {
+    font-size: 10px;
+  }
+}
+
+a-scene {
+  visibility: hidden;
+}
+
+body.vr-active a-scene {
+  visibility: visible;
+}
+
+.a-enter-vr,.a-enter-ar {
+  display: none!important;
+}

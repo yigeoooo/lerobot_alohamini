@@ -174,5 +174,6 @@ outputs/
 .cache/*
 *.stl
 *.urdf
+!src/lerobot/vr_gateway/assets/alohamini2pro/urdf/*.urdf
 *.xml
 *.part

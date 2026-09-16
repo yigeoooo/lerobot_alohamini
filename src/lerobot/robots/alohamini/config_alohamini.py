@@ -54,6 +54,8 @@ class AlohaMiniConfig(RobotConfig):
     left_port: str = "/dev/am_arm_follower_left"  # port to connect to the bus
     right_port: str = "/dev/am_arm_follower_right"  # port to connect to the bus
     disable_torque_on_disconnect: bool = True
+    # Calibrated VR must reject EEPROM drift instead of offering to rewrite it.
+    require_calibration_match: bool = False
     # robot_model drives the whole-robot hardware specs: follower arm profile, base motors,
     # lift motor, and lead screw pitch.
     # alohamini1   – so-arm-5dof,          base sts3215, lift sts3215, lead=84 mm/rev

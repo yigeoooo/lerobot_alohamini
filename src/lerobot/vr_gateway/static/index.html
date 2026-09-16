@@ -1,4 +1,90 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AlohaMini VR Teleop</title><style>
-:root{color-scheme:dark}body{margin:0;background:#101217;color:#eee;font:16px system-ui,sans-serif}main{max-width:960px;margin:auto;padding:12px}#view{display:block;width:100%;max-height:66vh;object-fit:contain;background:#000;border-radius:8px}button,input{font:inherit}button{padding:.55rem .8rem;margin:.25rem;border:0;border-radius:6px;background:#304a68;color:#fff}button:active{background:#567da6}.danger{background:#a32f35}.row{display:flex;flex-wrap:wrap;align-items:center;gap:.3rem}.panel{margin-top:.5rem;padding:.5rem;background:#1b1f29;border-radius:8px}.joystick{width:110px;height:110px;border-radius:50%;background:#333;position:relative;touch-action:none}.stick{width:38px;height:38px;border-radius:50%;background:#71a3d8;position:absolute;left:36px;top:36px}.label{min-width:80px}#status{margin-left:.5rem;color:#9dd39d}#input-log{margin:.5rem 0 0;min-height:1.2em;max-height:7em;overflow:auto;color:#b8c7d9;font:12px ui-monospace,monospace;white-space:pre-wrap}.hint{margin:.25rem 0 0;color:#a9b4c4;font-size:12px}</style></head>
-<body><main><h2>AlohaMini VR teleoperation</h2><img id="view" alt="forward camera"><canvas id="xr-canvas" width="1024" height="1024" hidden></canvas><div class="panel row"><button id="vr">Enter immersive VR</button><button id="estop" class="danger">E-STOP</button><button id="reset-estop">Release E-STOP</button><span id="status">connecting…</span></div><div class="panel row"><span class="label">Base</span><div id="joystick" class="joystick" aria-label="base joystick"><div class="stick"></div></div><label>Lift <input id="lift" type="range" min="0" max="500" value="250" step="1"></label><span id="lift-value">250 mm</span></div><div class="panel row"><label>Gripper <input id="gripper" type="range" min="0" max="1" value="0" step=".01"></label><span id="gripper-value">0%</span><button id="calibrate">Calibrate</button><button id="reanchor">Re-anchor / Align</button><button id="clutch">Hold arms: off</button></div><pre id="input-log" aria-live="polite"></pre><p class="hint">左手 Y 键重新对齐身体方向；随后按住对应侧扳机进入摇操。松开扳机保持该侧当前姿态。</p><p class="hint">手臂摇操时底盘和升降锁定；无手臂 clutch 时，左摇杆控制底盘，B=上升，A=下降。</p></main><script src="/static/app.js"></script></body></html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>AlohaMini · VR Teleoperation</title>
+  <link rel="stylesheet" href="/static/styles.css?v=20260916-vr5">
+  <script src="/static/vendor/aframe-1.7.1.min.js"></script>
+  <script src="/static/app.js?v=20260916-vr5" defer></script>
+</head>
+<body>
+<div id="limit-warning" class="limit-warning" role="alert" hidden></div>
+<main>
+  <header class="page-header">
+    <div><p class="eyebrow">ALOHA MINI / QUEST 3</p><h1>双臂遥操作<span>让动作，随手而动。</span></h1></div>
+    <button id="settings" class="secondary">操作设置</button>
+  </header>
+  <div class="workspace">
+    <section class="camera-card" aria-label="前置相机">
+      <div class="card-heading"><h2>机器人视野</h2><span id="camera-state">等待画面</span></div>
+      <div class="camera-view"><img id="view" alt="前置相机实时画面"></div>
+      <div class="camera-footer"><span>FORWARD CAMERA</span><span>桌面与头显同步</span></div>
+    </section>
+    <section class="status-card">
+      <div class="card-heading"><h2>连接与跟随</h2><span id="vr-state">VR 未进入</span></div>
+      <p id="status" role="status">正在连接网关…</p>
+      <div class="arm-grid">
+        <article><span class="arm-label">L / 左臂</span><strong id="left-state">等待状态</strong><p id="left-detail">连接未知 · 力矩未知</p></article>
+        <article><span class="arm-label">R / 右臂</span><strong id="right-state">等待状态</strong><p id="right-detail">连接未知 · 力矩未知</p></article>
+      </div>
+      <div class="health-row"><span id="mapping-state">标定待检查</span><span id="feedback-state">反馈待检查</span></div>
+      <button id="vr" class="primary wide">进入 VR</button>
+      <div class="button-row"><button id="clutch">暂停跟随</button><button id="align">重新对齐 / Y</button><button id="reanchor">重建锚点</button></div>
+      <div class="emergency-row"><button id="estop" class="danger">急停</button><button id="reset-estop" class="outline">解除急停</button></div>
+    </section>
+  </div>
+  <section class="instructions card">
+    <div><p class="eyebrow">CONTROLLER GUIDE</p><h2>握住跟随，松开保持</h2><p class="muted">左右手独立控制。每次握持都以当前手柄和机械臂位置为起点。</p></div>
+    <div class="instruction-grid">
+      <article><kbd>Grip</kbd><h3>机械臂跟随</h3><p>按住侧握键，平移或转动手柄；松开后保持该侧机械臂。</p></article>
+      <article><kbd>Trigger</kbd><h3>按住打开，松开闭合</h3><p>夹爪默认闭合，食指扳机按得越深打开越大。无需同时按住 Grip。</p></article>
+      <article><kbd>自动对齐 · Y</kbd><h3>朝向对齐</h3><p>开始握持时自动对齐头部朝向；中途加入的手沿用同一方向。双手松开后重新对齐，Y 可手动重置。</p></article>
+      <article><kbd>摇杆 · A / B</kbd><h3>底盘与升降</h3><p>左摇杆前后与横移，右摇杆转向；A 下降，B 上升。机械臂跟随时互锁。</p></article>
+    </div>
+  </section>
+  <section class="manual card">
+    <div><p class="eyebrow">DESKTOP CONTROLS</p><h2>底盘与升降</h2><p class="muted">W / S 前后 · A / D 转向</p></div>
+    <div id="joystick" class="joystick" aria-label="底盘摇杆"><div class="stick"></div></div>
+    <label class="lift-control">升降高度 <output id="lift-value">250 mm</output><input id="lift" type="range" min="0" max="500" value="250" step="1"></label>
+    <div class="gripper-controls"><label>左夹爪闭合 <input id="left-gripper" type="range" min="0" max="1" value="0" step=".01"></label><label>右夹爪闭合 <input id="right-gripper" type="range" min="0" max="1" value="0" step=".01"></label></div>
+  </section>
+  <details class="activity card"><summary>操作记录与诊断</summary><pre id="input-log" aria-live="polite"></pre><p id="diagnostics" class="muted">等待网关状态</p></details>
+  <footer>AlohaMini VR · 界面设计参考 Telegrip <a href="/static/vendor/telegrip-LICENSE.txt">MIT</a></footer>
+</main>
+<dialog id="settings-dialog">
+  <form id="settings-form">
+    <div class="card-heading"><h2>操作设置</h2><button id="settings-close" type="button" class="secondary" aria-label="关闭设置">关闭</button></div>
+    <p class="muted">应用设置时先保持机械臂，再以当前姿态重新建立锚点。</p>
+    <label>手部位移倍率 <input id="position-scale" type="number" min="0.1" max="2" step="0.1" value="0.5" required></label>
+    <label>机械臂关节速度上限（°/s）<input id="joint-speed" type="number" min="5" max="90" step="5" value="90" required></label>
+    <label>VR 画面方向 <select id="video-rotation"><option value="0">正常</option><option value="180">旋转 180°</option></select></label>
+    <details><summary>高级信息</summary><p id="model-info">AlohaMini 2 Pro · 六轴机械臂 · Placo</p><p id="tcp-info">等待 TCP 信息</p><p>机械标定通过本机标定流程管理。</p></details>
+    <button type="submit" class="primary wide">应用并重建锚点</button>
+  </form>
+</dialog>
+<canvas id="video-texture" width="640" height="480" hidden></canvas>
+<canvas id="hud-texture" width="1024" height="180" hidden></canvas>
+<canvas id="limit-texture" width="1024" height="150" hidden></canvas>
+<!-- All dependencies and controller geometry are local; no CDN or remote fonts. -->
+<a-scene embedded teleop-input vr-mode-ui="enabled: false" loading-screen="enabled: false" renderer="colorManagement: true; antialias: true; foveationLevel: 0" webxr="referenceSpaceType: local-floor" background="color: #101827">
+  <a-entity camera look-controls="enabled: false" position="0 0 0">
+    <a-plane id="video-plane" position="0 0 -1.5" rotation="0 0 0" width="1.6" height="1.2" material="shader: flat; src: #video-texture; side: double"></a-plane>
+    <a-plane id="hud-plane" position="0 -0.68 -1.5" width="1.6" height="0.28125" material="shader: flat; src: #hud-texture; transparent: true"></a-plane>
+    <a-plane id="limit-plane" visible="false" position="0 0.46 -1.49" width="1.55" height="0.227" material="shader: flat; src: #limit-texture; transparent: true"></a-plane>
+  </a-entity>
+  <a-entity id="left-model" visible="false">
+    <a-cylinder radius="0.023" height="0.10" rotation="-20 0 0" material="color: #dce6f2"></a-cylinder>
+    <a-sphere radius="0.032" position="0 0.045 -0.018" scale="1 0.45 1" material="color: #43556d"></a-sphere>
+    <a-box class="grip-indicator" position="0.021 0 0" width="0.006" height="0.04" depth="0.018" color="#73849e"></a-box>
+    <a-box class="trigger-indicator" position="0 0.025 -0.027" width="0.025" height="0.018" depth="0.01" color="#73849e"></a-box>
+  </a-entity>
+  <a-entity id="right-model" visible="false">
+    <a-cylinder radius="0.023" height="0.10" rotation="-20 0 0" material="color: #dce6f2"></a-cylinder>
+    <a-sphere radius="0.032" position="0 0.045 -0.018" scale="1 0.45 1" material="color: #43556d"></a-sphere>
+    <a-box class="grip-indicator" position="-0.021 0 0" width="0.006" height="0.04" depth="0.018" color="#73849e"></a-box>
+    <a-box class="trigger-indicator" position="0 0.025 -0.027" width="0.025" height="0.018" depth="0.01" color="#73849e"></a-box>
+  </a-entity>
+</a-scene>
+</body>
+</html>

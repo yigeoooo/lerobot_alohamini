@@ -8,12 +8,12 @@ which is always ``RANGE_0_100``).
 Coordinate conventions used throughout:
 
 * WebXR reference space: ``+x`` right, ``+y`` up, ``-z`` forward (away from the user).
-* AlohaMini ``base_link`` as used by the installed follower: ``+y`` is forward,
-  ``+x`` is left, and ``+z`` is up.
+* Default ``legacy_ik`` uses the original CAD basis and a separate wrist gesture
+  mapping. Explicit ``calibrated_ik`` uses ROS2 ``base_link`` with ``+x`` forward,
+  ``+y`` left and ``+z`` up, with the client's CAD basis rotated into that frame.
 
-Both the clutch reference and the live controller pose live in the *same* WebXR
-reference space, so relative motion is composed in that shared world frame and then
-rotated once into the robot base frame by :data:`VR_TO_ROBOT`.
+Controller translation and world-relative rotation use the same latched basis.
+Turning the head does not change that basis; explicit alignment re-anchors the arms.
 """
 
 from __future__ import annotations
@@ -25,17 +25,23 @@ import tempfile
 import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 from lerobot.utils.import_utils import require_package
+
+from .coordinates import aligned_xr_basis
+
+if TYPE_CHECKING:
+    from .calibration.profile import ArmMapping
 
 logger = logging.getLogger(__name__)
 
 
 def _diagnostics_enabled() -> bool:
     return os.environ.get("LEROBOT_VR_DIAGNOSTICS", "").strip().lower() in {"1", "true", "yes", "on"}
+
 
 SIDES: tuple[str, str] = ("left", "right")
 
@@ -145,12 +151,15 @@ def pose_to_matrix(pose: dict[str, Any] | None) -> np.ndarray | None:
     WebXR controller poses arrive as position plus XYZW quaternion. The matrix is a
     standard homogeneous transform in that same world frame.
     """
-    if not pose:
+    if not isinstance(pose, dict) or "position" not in pose or "orientation" not in pose:
         return None
-    position = np.asarray(pose.get("position", [0.0, 0.0, 0.0]), dtype=float)
+    try:
+        position = np.asarray(pose["position"], dtype=float)
+        rotation = quaternion_to_matrix(pose["orientation"])
+    except (TypeError, ValueError):
+        return None
     if position.shape != (3,) or not np.isfinite(position).all():
         return None
-    rotation = quaternion_to_matrix(pose.get("orientation", [0.0, 0.0, 0.0, 1.0]))
     if rotation is None:
         return None
     transform = np.eye(4)
@@ -233,24 +242,13 @@ def compose_target(
     basis: np.ndarray,
     position_scale: float = 1.0,
     orientation_scale: float = 1.0,
+    translation_direction: np.ndarray | None = None,
 ) -> np.ndarray:
     """Retarget the current controller pose relative to the clutch-time origin.
 
-    The mapping is the same idea as IsaacTeleop's clutch retargeting, but implemented
-    locally: keep the robot's latched home pose, then apply the controller delta
-    relative to the latched origin.
-
-    In math form:
-
-    - ``home`` = ``robot0``
-    - ``origin`` = ``ctrl0``
-    - ``current`` = ``ctrl``
-    - ``delta`` = ``current * inverse(origin)``
-    - ``target`` = ``delta * home``
-
-    The WebXR pose payloads use XYZW quaternions; the controller translation delta is
-    composed explicitly as ``home + scale * (current - origin)`` so the hand moves in
-    the shared reference space rather than in the controller's local frame.
+    ``R_target = A (R_C R_C0.T) A.T R_E0``. Both rotation and translation
+    are measured in the shared XR world, then mapped by the latched basis ``A``.
+    ``translation_direction`` exists only for the legacy CAD model.
     """
     home = np.asarray(robot0, dtype=float)
     origin = np.asarray(ctrl0, dtype=float)
@@ -260,10 +258,34 @@ def compose_target(
     rotation_delta = scale_rotation(rotation_delta, orientation_scale)
 
     target = np.eye(4)
-    target[:3, 3] = home[:3, 3] + position_scale * (basis @ (VR_TRANSLATION_DIRECTION @ position_delta))
+    direction = VR_TRANSLATION_DIRECTION if translation_direction is None else translation_direction
+    target[:3, 3] = home[:3, 3] + position_scale * (basis @ (direction @ position_delta))
     # Re-project onto SO(3): the solver is handed this matrix directly, and a chain of
     # products must not be allowed to drift off the manifold.
-    target[:3, :3] = orthonormalize((basis @ rotation_delta @ basis.T) @ home[:3, :3])
+    target[:3, :3] = orthonormalize(basis @ rotation_delta @ basis.T @ home[:3, :3])
+    return target
+
+
+def clamp_pose_lead(
+    candidate: np.ndarray,
+    measured: np.ndarray,
+    max_position_lead_m: float | None,
+    max_orientation_lead_rad: float | None,
+) -> np.ndarray:
+    """Bound a Cartesian target's lead over the measured TCP pose."""
+    target = np.asarray(candidate, dtype=float).copy()
+    actual = np.asarray(measured, dtype=float)
+    if max_position_lead_m is not None:
+        delta = target[:3, 3] - actual[:3, 3]
+        distance = float(np.linalg.norm(delta))
+        if distance > max_position_lead_m and distance > 0.0:
+            target[:3, 3] = actual[:3, 3] + delta * (max_position_lead_m / distance)
+    if max_orientation_lead_rad is not None:
+        local_delta = actual[:3, :3].T @ target[:3, :3]
+        angle = rotation_angle(local_delta)
+        if angle > max_orientation_lead_rad and angle > 0.0:
+            local_delta = scale_rotation(local_delta, max_orientation_lead_rad / angle)
+            target[:3, :3] = orthonormalize(actual[:3, :3] @ local_delta)
     return target
 
 
@@ -377,7 +399,8 @@ class AlohaMiniDualArmIK:
         orientation_scale: float = 1.0,
         position_weight: float = 1.0,
         orientation_weight: float = 1.0,
-        posture_weight: float = 5e-4,
+        orientation_motion_weight: float | None = None,
+        posture_weight: float = 1e-6,
         regularization: float = 1e-5,
         solver_dt: float = 0.04,
         solver_iterations: int = 20,
@@ -385,6 +408,8 @@ class AlohaMiniDualArmIK:
         orientation_tolerance_rad: float = 5e-3,
         max_joint_speed_deg_s: float = 90.0,
         max_state_deviation_deg: float | None = 45.0,
+        max_target_position_lead_m: float | None = None,
+        max_target_orientation_lead_rad: float | None = None,
         joint_limits_deg: dict[str, tuple[float, float]] | None = None,
         deadband_m: float = 0.0015,
         deadband_rad: float = 0.01,
@@ -397,12 +422,18 @@ class AlohaMiniDualArmIK:
         vr_to_robot: np.ndarray | None = None,
         joint_signs: dict[str, float] | None = None,
         joint_offsets_deg: dict[str, float] | None = None,
+        arm_mapping: ArmMapping | None = None,
+        body_basis_rotation: np.ndarray | None = None,
+        translation_direction: np.ndarray | None = None,
         lift_height_mm_range: tuple[float, float] = (0.0, 600.0),
         home_posture_deg: dict[str, dict[str, float]] | None = None,
         home_speed_deg_s: float = 20.0,
         home_tolerance_deg: float = 2.0,
         home_max_state_deviation_deg: float = 5.0,
         home_before_engage: bool = True,
+        max_feedback_age_s: float = 0.5,
+        retry_budget_s: float = 0.006,
+        retry_after_frames: int = 5,
     ):
         """
         Args:
@@ -419,9 +450,12 @@ class AlohaMiniDualArmIK:
             position_weight: placo frame-task weight on the position sub-task.
             orientation_weight: placo frame-task weight on the orientation sub-task.
                 Must be > 0 or the commanded wrist orientation is ignored entirely.
-            posture_weight: Weight of the low-priority shoulder/elbow posture task that
-                pins non-wrist joints to their clutch-time posture. Wrist joints are
-                deliberately excluded so rotation remains responsive.
+            orientation_motion_weight: Optional higher orientation weight used when
+                the controller is explicitly rotated from its clutch anchor. The
+                transition is gradual over ``max_target_orientation_lead_rad``.
+            posture_weight: Soft shoulder/elbow preference for the clutch-time posture.
+                This competes with the tip task, so keep it small enough to permit
+                straight-arm reach. Wrist joints are excluded.
             regularization: placo regularization task weight (keeps the QP well posed).
             solver_dt: Integration step handed to placo, used by its joint/velocity
                 limit constraints.
@@ -435,6 +469,10 @@ class AlohaMiniDualArmIK:
                 ``max_relative_target`` (which the gateway currently leaves disabled) and
                 bounds the damage from an open-loop runaway or a current-limited /
                 stalled servo. ``None`` disables it.
+            max_target_position_lead_m: Maximum Cartesian position lead over measured
+                TCP feedback. ``None`` disables it.
+            max_target_orientation_lead_rad: Maximum Cartesian orientation lead over
+                measured TCP feedback. ``None`` disables it.
             joint_limits_deg: Per-joint ``(lower, upper)`` override in URDF degrees. The
                 shipped URDF declares a uniform +-180 deg, which is far wider than the
                 real servo travel, so this should be narrowed once measured on hardware.
@@ -442,7 +480,9 @@ class AlohaMiniDualArmIK:
                 target (not frame to frame), so slow motion still accumulates through.
             deadband_rad: Rotation deadband, same accumulate-then-commit semantics.
             nominal_dt: Tick period ``smooth`` was tuned at.
-            min_dt / max_dt: Clamp on the measured wall-clock tick period.
+            min_dt / max_dt: Bounds for the measured wall-clock tick period. Runtime
+                motion additionally caps a delayed frame to one ``nominal_dt`` budget,
+                so scheduler or serial stalls cannot be spent as a catch-up jump.
             fixed_dt: Bypass the wall clock and assume this tick period. Use when the
                 caller drives ``update`` at a known fixed rate, or for reproducible
                 tests; ``None`` (default) measures the real period.
@@ -456,6 +496,11 @@ class AlohaMiniDualArmIK:
             joint_signs: Per-joint ``+1/-1`` correction if the servo direction disagrees
                 with the URDF axis. Keys are entries of :data:`ARM_JOINTS`.
             joint_offsets_deg: Per-joint zero offset, ``robot_deg = sign * urdf_deg + offset``.
+            arm_mapping: Current machine's ROS2 reference mapping. Replaces the legacy
+                sign/offset conversion and supplies limits to both solver and output.
+            body_basis_rotation: Rotate client CAD body bases into the model's base frame.
+            translation_direction: Translation-only legacy correction. Calibrated models
+                use identity so position and orientation share the same proper rotation.
             lift_height_mm_range: The robot's real ``lift_axis.height_mm`` span
                 (``LiftAxisConfig.soft_min_mm``/``soft_max_mm``), rescaled 1:1 onto the
                 URDF's ``vertical_move`` joint limits every tick so the model's shoulder
@@ -490,6 +535,11 @@ class AlohaMiniDualArmIK:
         self.orientation_scale = float(orientation_scale)
         self.position_weight = float(position_weight)
         self.orientation_weight = float(orientation_weight)
+        self.orientation_motion_weight = (
+            self.orientation_weight if orientation_motion_weight is None else float(orientation_motion_weight)
+        )
+        if self.orientation_weight <= 0.0 or self.orientation_motion_weight <= 0.0:
+            raise ValueError("orientation weights must be positive")
         self.posture_weight = float(posture_weight)
         self.solver_iterations = max(1, int(solver_iterations))
         self.position_tolerance_m = float(position_tolerance_m)
@@ -498,6 +548,16 @@ class AlohaMiniDualArmIK:
         self.max_state_deviation_deg = (
             None if max_state_deviation_deg is None else float(max_state_deviation_deg)
         )
+        self.max_target_position_lead_m = (
+            None if max_target_position_lead_m is None else float(max_target_position_lead_m)
+        )
+        self.max_target_orientation_lead_rad = (
+            None if max_target_orientation_lead_rad is None else float(max_target_orientation_lead_rad)
+        )
+        if self.max_target_position_lead_m is not None and self.max_target_position_lead_m < 0.0:
+            raise ValueError("max_target_position_lead_m cannot be negative")
+        if self.max_target_orientation_lead_rad is not None and self.max_target_orientation_lead_rad < 0.0:
+            raise ValueError("max_target_orientation_lead_rad cannot be negative")
         self.deadband_m = float(deadband_m)
         self.deadband_rad = float(deadband_rad)
         self.nominal_dt = float(nominal_dt)
@@ -511,6 +571,27 @@ class AlohaMiniDualArmIK:
         self.state_blend = float(np.clip(state_blend, 0.0, 1.0))
         self.active = False
         self.active_sides: set[str] = set()
+        self.max_feedback_age_s = float(max_feedback_age_s)
+        self.retry_budget_s = max(0.0, float(retry_budget_s))
+        self.retry_after_frames = max(1, int(retry_after_frames))
+        self._difficult_frames = 0
+        self._retry_index = 0
+        # A small session-local six-axis pose library. It cannot survive a model
+        # or calibration reload: neither a reference Home nor a seed is a target.
+        self._seed_history: list[dict[str, np.ndarray]] = []
+        self.retry_attempts = 0
+        self.retry_accepted = 0
+        self.arm_mapping = arm_mapping
+        if arm_mapping is not None and (joint_signs or joint_offsets_deg):
+            raise ValueError("arm_mapping replaces joint_signs/joint_offsets_deg")
+        self._body_basis_rotation = (
+            np.eye(3) if body_basis_rotation is None else np.asarray(body_basis_rotation, dtype=float)
+        )
+        self._translation_direction = (
+            VR_TRANSLATION_DIRECTION.copy()
+            if translation_direction is None
+            else np.asarray(translation_direction, dtype=float)
+        )
 
         home_posture = home_posture_deg if home_posture_deg is not None else DEFAULT_HOME_POSTURE_DEG
         unknown_home = {
@@ -599,9 +680,18 @@ class AlohaMiniDualArmIK:
                 np.array([self.robot.get_joint_limits(n) for n in self.joints[side]], dtype=float)
             )
             for index, name in enumerate(ARM_JOINTS):
+                if self.arm_mapping is not None:
+                    limits[index] = self.arm_mapping.limits_deg[side][index]
                 override = (joint_limits_deg or {}).get(name)
                 if override is not None:
-                    limits[index] = [float(override[0]), float(override[1])]
+                    lo, hi = map(float, override)
+                    if self.arm_mapping is not None:
+                        lo, hi = max(lo, limits[index, 0]), min(hi, limits[index, 1])
+                    limits[index] = [lo, hi]
+                if not np.isfinite(limits[index]).all() or limits[index, 0] >= limits[index, 1]:
+                    raise ValueError(f"Invalid joint limits for {side}_{name}")
+                if self.arm_mapping is not None or override is not None:
+                    self.robot.set_joint_limits(self.joints[side][index], *np.deg2rad(limits[index]))
             self.joint_limits_deg[side] = limits
 
         self.solver.add_regularization_task(float(regularization))
@@ -613,14 +703,13 @@ class AlohaMiniDualArmIK:
             task.configure(f"{side}_tip", "soft", self.position_weight, self.orientation_weight)
             self.tasks[side] = task
             posture = self.solver.add_joints_task()
-            # Keep the redundant shoulder/elbow configuration near engage posture,
-            # while leaving every wrist DOF available to satisfy orientation tracking.
-            posture.set_joints({
-                self.joints[side][index]: 0.0
-                for index in range(3)
-            })
+            # A weak soft preference, not a strict nullspace task: a larger weight
+            # leaves the elbow bent even when a straight tip target is reachable.
+            posture.set_joints({self.joints[side][index]: 0.0 for index in range(3)})
             posture.configure(f"{side}_posture", "soft", self.posture_weight)
             self.posture_tasks[side] = posture
+
+        self._task_orientation_weight = dict.fromkeys(SIDES, self.orientation_weight)
 
         self._ctrl0: dict[str, np.ndarray | None] = dict.fromkeys(SIDES)
         self._robot0: dict[str, np.ndarray | None] = dict.fromkeys(SIDES)
@@ -629,7 +718,7 @@ class AlohaMiniDualArmIK:
         self._last_time: float | None = None
         self._warned_invalid_pose = False
         self._engage_reason: str | None = None
-        self._body_basis = VR_TO_ROBOT.copy()
+        self._body_basis = self._body_basis_rotation @ self._vr_to_robot
 
     @staticmethod
     def required_state_keys() -> tuple[str, ...]:
@@ -643,6 +732,13 @@ class AlohaMiniDualArmIK:
         return [key for key in self.required_state_keys() if key not in state]
 
     def _state_is_fresh_and_complete(self, state: dict[str, Any]) -> tuple[bool, str | None]:
+        # The gateway timestamps acquisition on the host monotonic clock. Offline
+        # replay callers without this metadata own their sampling cadence.
+        sampled_at = state.get("_vr_state_sampled_at")
+        if sampled_at is not None:
+            age = time.monotonic() - float(sampled_at)
+            if not np.isfinite(age) or age < 0.0 or age > self.max_feedback_age_s:
+                return False, "stale_feedback"
         missing = self._missing_state_keys(state)
         if missing:
             return False, f"missing_state:{','.join(missing)}"
@@ -700,6 +796,9 @@ class AlohaMiniDualArmIK:
     # -- unit conversion ---------------------------------------------------------------
     def _state_to_urdf_deg(self, side: str, state: dict[str, Any]) -> np.ndarray:
         """Read measured joint positions (degrees, ``use_degrees=True``) into URDF degrees."""
+        if self.arm_mapping is not None:
+            values = [float(state[f"arm_{side}_{name}.pos"]) for name in ARM_JOINTS]
+            return np.asarray(self.arm_mapping.to_urdf_deg(side, values))
         values = []
         for name in ARM_JOINTS:
             raw = state.get(f"arm_{side}_{name}.pos", 0.0)
@@ -722,7 +821,11 @@ class AlohaMiniDualArmIK:
             return None
         return self._state_to_urdf_deg(side, state)
 
-    def _urdf_deg_to_robot_deg(self, values: np.ndarray) -> np.ndarray:
+    def _urdf_deg_to_robot_deg(self, values: np.ndarray, side: str | None = None) -> np.ndarray:
+        if self.arm_mapping is not None:
+            if side is None:
+                raise ValueError("Calibrated conversion requires an arm side")
+            return np.asarray(self.arm_mapping.to_robot_deg(side, values))
         return np.array(
             [v * self._signs[name] + self._offsets[name] for name, v in zip(ARM_JOINTS, values, strict=True)],
             dtype=float,
@@ -768,7 +871,24 @@ class AlohaMiniDualArmIK:
             self._body_basis,
             self.position_scale,
             self.orientation_scale,
+            self._translation_direction,
         )
+
+    def _update_orientation_weight(self, side: str, ctrl: np.ndarray) -> None:
+        """Raise wrist-orientation priority only when the operator rotates the grip."""
+        anchor = self._ctrl0[side]
+        if anchor is None:
+            return
+        requested_angle = rotation_angle(anchor[:3, :3].T @ ctrl[:3, :3])
+        ramp = self.max_target_orientation_lead_rad or np.deg2rad(15.0)
+        fraction = float(np.clip(requested_angle / max(ramp, 1e-9), 0.0, 1.0))
+        weight = self.orientation_weight + fraction * (
+            self.orientation_motion_weight - self.orientation_weight
+        )
+        if abs(weight - self._task_orientation_weight[side]) <= 1e-12:
+            return
+        self.tasks[side].configure(f"{side}_tip", "soft", self.position_weight, weight)
+        self._task_orientation_weight[side] = weight
 
     def _tick_dt(self) -> float:
         if self.fixed_dt is not None:
@@ -777,7 +897,8 @@ class AlohaMiniDualArmIK:
         previous, self._last_time = self._last_time, now
         if previous is None:
             return self.nominal_dt
-        return float(np.clip(now - previous, self.min_dt, self.max_dt))
+        elapsed = float(np.clip(now - previous, self.min_dt, self.max_dt))
+        return min(elapsed, self.nominal_dt)
 
     def _reset(self) -> None:
         self.active = False
@@ -792,18 +913,68 @@ class AlohaMiniDualArmIK:
         self._homing_command_deg = dict.fromkeys(SIDES)
         self._home_max_error_deg = None
 
+    def release(self, sides=SIDES) -> None:
+        """Forget only these clutch anchors, without moving either arm."""
+        for side in sides:
+            self.active_sides.discard(side)
+            self._ctrl0[side] = self._robot0[side] = self._target[side] = None
+            self._last_output[side] = None
+        self.active = bool(self.active_sides)
+        if not self.active:
+            self._last_time = None
+            self._homing = False
+
+    def align(self, head_pose: dict[str, Any]) -> None:
+        pose = pose_to_matrix(head_pose)
+        if pose is None:
+            raise ValueError("alignment requires a valid current head pose")
+        self._body_basis = aligned_xr_basis(pose[:3, :3])
+        self.release()
+
+    def accept_action(self, action: dict[str, Any]) -> None:
+        """Seed the next solve from targets actually accepted by the motor driver."""
+        for side in self.active_sides:
+            if all(f"arm_{side}_{joint}.pos" in action for joint in ARM_JOINTS):
+                self._last_output[side] = self._state_to_urdf_deg(side, action)
+
+    def joint_limit_warnings(self, state: dict[str, Any]) -> list[dict[str, str]]:
+        """Report measured/accepted joints within 0.5 degrees of installed limits.
+
+        A velocity clamp or an IK residual alone is not a joint-limit event.
+        Convert feedback through the same signs/Home mapping as the solver.
+        """
+        warnings = []
+        for side in SIDES:
+            try:
+                measured = self._measured_urdf_deg(side, state)
+            except (ValueError, KeyError, TypeError):
+                continue
+            samples = [measured]
+            if side in self.active_sides:
+                samples.append(self._last_output[side])
+            limits = self.joint_limits_deg[side]
+            for index, joint in enumerate(ARM_JOINTS):
+                for sample in samples:
+                    if sample is None or not np.isfinite(sample[index]):
+                        continue
+                    if sample[index] <= limits[index, 0] + 0.5:
+                        warnings.append({"side": side, "joint": joint, "bound": "lower"})
+                        break
+                    if sample[index] >= limits[index, 1] - 0.5:
+                        warnings.append({"side": side, "joint": joint, "bound": "upper"})
+                        break
+        return warnings
+
     def _is_at_home_posture(self, state: dict[str, Any]) -> bool:
         for side in SIDES:
             measured = self._measured_urdf_deg(side, state)
             if measured is None:
                 return False
-            target = np.array(
-                [self._home_posture_deg[side][name] for name in ARM_JOINTS], dtype=float
-            )
+            target = np.array([self._home_posture_deg[side][name] for name in ARM_JOINTS], dtype=float)
             # Compare in robot-frame degrees (the space home_posture_deg is authored
             # in), not URDF degrees, so joint_signs/joint_offsets_deg don't need to be
             # accounted for twice.
-            current = self._urdf_deg_to_robot_deg(measured)
+            current = self._urdf_deg_to_robot_deg(measured, side)
             if np.any(np.abs(current - target) > self.home_tolerance_deg):
                 return False
         return True
@@ -822,10 +993,8 @@ class AlohaMiniDualArmIK:
             measured = self._measured_urdf_deg(side, state)
             if measured is None:
                 return None
-            current = self._urdf_deg_to_robot_deg(measured)
-            target = np.array(
-                [self._home_posture_deg[side][name] for name in ARM_JOINTS], dtype=float
-            )
+            current = self._urdf_deg_to_robot_deg(measured, side)
+            target = np.array([self._home_posture_deg[side][name] for name in ARM_JOINTS], dtype=float)
             error = np.abs(current - target)
             max_error_deg = max(max_error_deg, float(np.max(error)))
             if np.any(error > self.home_tolerance_deg):
@@ -873,11 +1042,13 @@ class AlohaMiniDualArmIK:
             self._robot0[side] = np.array(self.robot.get_T_world_frame(self.tip_frames[side]))
             self._ctrl0[side] = poses[side].copy()
             self._target[side] = self._robot0[side].copy()
-            # Pin the nullspace to the posture we clutched in at.
-            self.posture_tasks[side].set_joints({
-                name: float(np.deg2rad(value))
-                for name, value in zip(self.joints[side][:3], self._last_output[side][:3], strict=True)
-            })
+            # Set the weak posture preference to the clutch-time pose.
+            self.posture_tasks[side].set_joints(
+                {
+                    name: float(np.deg2rad(value))
+                    for name, value in zip(self.joints[side][:3], self._last_output[side][:3], strict=True)
+                }
+            )
         self._last_time = time.monotonic()
         self.active = True
         self.active_sides.update(SIDES)
@@ -902,10 +1073,12 @@ class AlohaMiniDualArmIK:
         self._robot0[side] = np.array(self.robot.get_T_world_frame(self.tip_frames[side]))
         self._ctrl0[side] = pose.copy()
         self._target[side] = self._robot0[side].copy()
-        self.posture_tasks[side].set_joints({
-            name: float(np.deg2rad(value))
-            for name, value in zip(self.joints[side][:3], measured[:3], strict=True)
-        })
+        self.posture_tasks[side].set_joints(
+            {
+                name: float(np.deg2rad(value))
+                for name, value in zip(self.joints[side][:3], measured[:3], strict=True)
+            }
+        )
         self._engage_reason = None
         self._home_max_error_deg = 0.0
         return True
@@ -924,9 +1097,11 @@ class AlohaMiniDualArmIK:
             logger.info("VR IK reanchored to current controller pose")
         return ok
 
-    def _solve(self) -> bool:
+    def _solve(self, *, deadline: float | None = None) -> bool:
         """Iterate the differential IK until both frame tasks converge (or we run out)."""
         for _ in range(self.solver_iterations):
+            if deadline is not None and time.monotonic() >= deadline:
+                return False
             self.solver.solve(True)
             self.robot.update_kinematics()
             converged = True
@@ -941,6 +1116,91 @@ class AlohaMiniDualArmIK:
             if converged:
                 return True
         return False
+
+    def _candidate_errors(self) -> dict[str, tuple[float, float]]:
+        return {
+            side: pose_difference(
+                np.array(self.robot.get_T_world_frame(self.tip_frames[side])), self._target[side]
+            )
+            for side in self.active_sides
+        }
+
+    def _try_alternate_seed(self, state: dict[str, Any]) -> None:
+        """Try at most one nearby seed after sustained error; retain the better FK.
+
+        The primary continuous solve always runs first. All six joints participate
+        in candidate validation; output velocity and measured-lead limits still
+        apply afterwards. The deadline is checked between QP iterations.
+        """
+        errors = self._candidate_errors()
+        difficult = any(position > 0.008 or angle > 0.15 for position, angle in errors.values())
+        self._difficult_frames = self._difficult_frames + 1 if difficult else 0
+        primary = {side: self._read_joints(side) for side in SIDES}
+        if not difficult:
+            if all(np.isfinite(q).all() for q in primary.values()) and (
+                not self._seed_history
+                or any(
+                    np.max(np.abs(primary[s] - self._seed_history[-1][s])) > 3.0 for s in self.active_sides
+                )
+            ):
+                self._seed_history.append(primary)
+                self._seed_history = self._seed_history[-8:]
+            return
+        if self.retry_budget_s <= 0 or self._difficult_frames < self.retry_after_frames:
+            return
+        self._difficult_frames = 0
+        measured = {side: self._state_to_urdf_deg(side, state) for side in self.active_sides}
+        seed = {side: q.copy() for side, q in measured.items()}
+        if self._seed_history and self._retry_index % 3 == 0:
+            saved = self._seed_history[-1 - (self._retry_index // 3) % len(self._seed_history)]
+            seed = {side: np.clip(saved[side], q - 10.0, q + 10.0) for side, q in measured.items()}
+        else:
+            direction = 1.0 if self._retry_index % 2 else -1.0
+            for q in seed.values():
+                q[2] += direction * 3.0
+                q[3] -= direction * 3.0
+        self._retry_index += 1
+        self.retry_attempts += 1
+        accepted = False
+        try:
+            for side, q in seed.items():
+                limits = self.joint_limits_deg[side]
+                self._write_joints(side, np.clip(q, limits[:, 0], limits[:, 1]))
+            self.robot.update_kinematics()
+            self._solve(deadline=time.monotonic() + self.retry_budget_s)
+            candidate_errors = self._candidate_errors()
+            valid = True
+            for side in self.active_sides:
+                q = self._read_joints(side)
+                limits = self.joint_limits_deg[side]
+                p, r = candidate_errors[side]
+                old_p, old_r = errors[side]
+                valid &= bool(
+                    np.isfinite(q).all()
+                    and np.all(q >= limits[:, 0] - 1e-6)
+                    and np.all(q <= limits[:, 1] + 1e-6)
+                    and np.max(np.abs(q - measured[side])) <= 15.0
+                    and np.max(np.abs(q - self._last_output[side])) <= 15.0
+                    and p <= old_p + 0.001
+                    and r <= old_r + 0.03
+                )
+
+            def score(values):
+                return sum(
+                    self.position_weight * p * p + self._task_orientation_weight[s] * r * r
+                    for s, (p, r) in values.items()
+                )
+
+            accepted = valid and score(candidate_errors) < 0.85 * score(errors)
+            if accepted:
+                self.retry_accepted += 1
+        except Exception:
+            logger.debug("Alternate IK seed rejected", exc_info=True)
+        finally:
+            if not accepted:
+                for side, q in primary.items():
+                    self._write_joints(side, q)
+                self.robot.update_kinematics()
 
     # -- public API --------------------------------------------------------------------
     @staticmethod
@@ -971,20 +1231,14 @@ class AlohaMiniDualArmIK:
                 }
                 for side in SIDES
             }
-            fact_joints = {
-                key: state[key]
-                for key in self.required_state_keys()
-                if key in state
-            }
+            fact_joints = {key: state[key] for key in self.required_state_keys() if key in state}
             logger.info(
                 "[VR-DIAG] input active=%s left_active=%s right_active=%s body_basis=%s "
                 "poses=%s fact_joints=%s",
                 bool(payload.get("active")),
                 bool(payload.get("left_active", payload.get("active"))),
                 bool(payload.get("right_active", payload.get("active"))),
-                np.asarray(payload.get("body_basis", self._body_basis), dtype=float)
-                .round(5)
-                .tolist(),
+                np.asarray(payload.get("body_basis", self._body_basis), dtype=float).round(5).tolist(),
                 pose_summary,
                 fact_joints,
             )
@@ -992,8 +1246,15 @@ class AlohaMiniDualArmIK:
         if raw_basis is not None:
             try:
                 basis = np.asarray(raw_basis, dtype=float).reshape(3, 3)
-                if np.isfinite(basis).all() and np.isclose(np.linalg.det(basis), 1.0, atol=1e-3):
-                    self._body_basis = basis
+                if (
+                    np.isfinite(basis).all()
+                    and np.isclose(np.linalg.det(basis), 1.0, atol=1e-3)
+                    and np.allclose(basis.T @ basis, np.eye(3), atol=1e-3)
+                ):
+                    next_basis = self._body_basis_rotation @ basis
+                    if not np.allclose(next_basis, self._body_basis):
+                        self.release()
+                        self._body_basis = next_basis
             except (TypeError, ValueError):
                 pass
         legacy_active = bool(payload.get("active"))
@@ -1010,9 +1271,21 @@ class AlohaMiniDualArmIK:
             self._reset()
             return {}
 
+        ok, reason = self._state_is_fresh_and_complete(state)
+        if self.arm_mapping is not None and ok:
+            try:
+                for side in SIDES:
+                    self._state_to_urdf_deg(side, state)
+            except (ValueError, KeyError, TypeError) as exc:
+                ok, reason = False, f"invalid_calibrated_state:{exc}"
+        if not ok:
+            self._reset()
+            self._engage_reason = reason
+            return {}
+
         # A released side must stop producing new targets immediately, while the
         # other side keeps its clutch origin and continues independently.
-        self.active_sides.intersection_update({side for side, active in requested.items() if active})
+        self.release(self.active_sides - {side for side, active in requested.items() if active})
 
         poses: dict[str, np.ndarray] = {}
         for side in SIDES:
@@ -1020,8 +1293,7 @@ class AlohaMiniDualArmIK:
                 continue
             pose = pose_to_matrix(payload.get(side))
             if pose is None:
-                # Hold without touching any latched state: a dropped/garbled frame must
-                # not desynchronise the clutch reference.
+                self.release([side])
                 if not self._warned_invalid_pose:
                     logger.warning("Ignoring VR arm payload with unusable %s controller pose", side)
                     self._warned_invalid_pose = True
@@ -1029,9 +1301,7 @@ class AlohaMiniDualArmIK:
             poses[side] = pose
         self._warned_invalid_pose = False
 
-        reanchor_requested = bool(
-            payload.get("reanchor") or payload.get("align") or payload.get("calibrate")
-        )
+        reanchor_requested = bool(payload.get("reanchor") or payload.get("align") or payload.get("calibrate"))
         # A side is engaged independently. Re-anchor only the requested sides;
         # releasing one hand never clears the other hand's origin.
         if reanchor_requested and self.active_sides:
@@ -1080,6 +1350,18 @@ class AlohaMiniDualArmIK:
         # engage time. The target frame stays a fixed world-frame pose regardless.
         self._sync_lift_joint(state)
 
+        # Capture measured TCP feedback before blending it with the previous command.
+        # Cartesian target lead is bounded against this pose, not the open-loop seed.
+        measured_tcp: dict[str, np.ndarray] = {}
+        for side in self.active_sides:
+            measured = self._measured_urdf_deg(side, state)
+            if measured is not None:
+                self._write_joints(side, measured)
+        self.robot.update_kinematics()
+        for side in self.active_sides:
+            if self._measured_urdf_deg(side, state) is not None:
+                measured_tcp[side] = np.array(self.robot.get_T_world_frame(self.tip_frames[side]))
+
         # Seed the model from the last command, optionally corrected towards reality.
         for side in SIDES:
             if side not in self.active_sides:
@@ -1096,11 +1378,17 @@ class AlohaMiniDualArmIK:
                 # Keep the inactive arm's frame task exactly at its current FK
                 # pose so Placo cannot use it as a free secondary objective while
                 # solving the engaged side.
-                self.tasks[side].T_world_frame = np.array(
-                    self.robot.get_T_world_frame(self.tip_frames[side])
-                )
+                self.tasks[side].T_world_frame = np.array(self.robot.get_T_world_frame(self.tip_frames[side]))
                 continue
+            self._update_orientation_weight(side, poses[side])
             candidate = self._target_from_delta(side, poses[side])
+            if side in measured_tcp:
+                candidate = clamp_pose_lead(
+                    candidate,
+                    measured_tcp[side],
+                    self.max_target_position_lead_m,
+                    self.max_target_orientation_lead_rad,
+                )
             if should_commit_target(candidate, self._target[side], self.deadband_m, self.deadband_rad):
                 self._target[side] = candidate
             self.tasks[side].T_world_frame = self._target[side]
@@ -1110,10 +1398,11 @@ class AlohaMiniDualArmIK:
                 # Not fatal: the target is simply out of reach or near a singularity, and
                 # the output clamps below keep the partial solution safe.
                 logger.debug("VR IK did not converge within %d iterations", self.solver_iterations)
+            self._try_alternate_seed(state)
         except Exception:
             logger.exception("VR IK solve failed; holding previous joint targets")
             # Restore the model to the seed so the next tick starts from a sane state.
-            for side in SIDES:
+            for side in self.active_sides:
                 self._write_joints(side, self._last_output[side])
             self.robot.update_kinematics()
             return {}
@@ -1125,7 +1414,7 @@ class AlohaMiniDualArmIK:
             raw = self._read_joints(side)
             if not np.isfinite(raw).all():
                 logger.warning("VR IK produced a non-finite solution for %s arm; holding", side)
-                for other in SIDES:
+                for other in self.active_sides:
                     self._write_joints(other, self._last_output[other])
                 self.robot.update_kinematics()
                 return {}
@@ -1142,24 +1431,19 @@ class AlohaMiniDualArmIK:
                         measured - self.max_state_deviation_deg,
                         measured + self.max_state_deviation_deg,
                     )
-            solution[side] = command
+            solution[side] = np.clip(command, limits[:, 0], limits[:, 1])
 
         out: dict[str, float] = {}
         for side in SIDES:
             if side not in self.active_sides:
                 continue
             self._last_output[side] = solution[side]
-            for name, value in zip(ARM_JOINTS, self._urdf_deg_to_robot_deg(solution[side]), strict=True):
+            for name, value in zip(
+                ARM_JOINTS, self._urdf_deg_to_robot_deg(solution[side], side), strict=True
+            ):
                 out[f"arm_{side}_{name}.pos"] = float(value)
-            trigger = payload.get(f"{side}_gripper", 0.0)
-            try:
-                trigger = float(trigger)
-            except (TypeError, ValueError):
-                trigger = 0.0
-            if not np.isfinite(trigger):
-                trigger = 0.0
-            # Gripper motors are RANGE_0_100 regardless of use_degrees.
-            out[f"arm_{side}_gripper.pos"] = float(np.clip(trigger, 0.0, 1.0) * 100.0)
+            # Trigger commands are independent of the arm clutch and handled by
+            # the gateway using this machine's gripper calibration endpoints.
             if _diagnostics_enabled():
                 fk = np.array(self.robot.get_T_world_frame(self.tip_frames[side]))
                 target = self._target[side]
@@ -1172,10 +1456,12 @@ class AlohaMiniDualArmIK:
                     np.asarray(fk[:3, 3]).round(6).tolist(),
                     np.asarray(target[:3, 3] - fk[:3, 3]).round(6).tolist(),
                     np.asarray(
-                        self._urdf_deg_to_robot_deg(measured if measured is not None else solution[side])
+                        self._urdf_deg_to_robot_deg(
+                            measured if measured is not None else solution[side], side
+                        )
                     )
                     .round(3)
                     .tolist(),
-                    np.asarray(self._urdf_deg_to_robot_deg(solution[side])).round(3).tolist(),
+                    np.asarray(self._urdf_deg_to_robot_deg(solution[side], side)).round(3).tolist(),
                 )
         return out

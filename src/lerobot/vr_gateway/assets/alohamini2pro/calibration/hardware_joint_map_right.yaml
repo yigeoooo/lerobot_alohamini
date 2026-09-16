@@ -1,0 +1,119 @@
+schema_version: 1
+robot_model: alohamini2pro
+side: right
+ticks_per_revolution: 4096
+joints:
+  shoulder_pan:
+    id: 1
+    model: sts3250
+    zero_tick: null
+    reference_tick: 2041
+    reference_q_rad: 0.0
+    sign: 1
+    positive_direction_sample_tick: null
+    positive_direction_delta_tick: null
+    safe_q_min_rad: -2.219670200070399
+    safe_q_max_rad: 2.184388641949601
+    direction_validation:
+      status: corrected_from_live_state_rviz_comparison
+      date: "2026-08-13"
+      observed: Both physical shoulder_pan joints rotated opposite to their URDF visualization when live Host observations used sign -1.
+      required_raw_direction_for_positive_q: increasing_ticks
+      supersedes: moveit_m4_hardware_test_2026_08_11
+  shoulder_lift:
+    id: 2
+    model: sts3095
+    zero_tick: null
+    reference_tick: 969
+    reference_q_rad: 0.0
+    sign: -1
+    positive_direction_sample_tick: 1715
+    positive_direction_delta_tick: -332
+    safe_q_max_rad: 0.009203884727279
+    safe_q_min_rad: -3.482136388500722
+  elbow_flex:
+    id: 3
+    model: sts3095
+    zero_tick: null
+    reference_tick: 3074
+    reference_q_rad: 0.0
+    sign: -1
+    positive_direction_sample_tick: 1646
+    positive_direction_delta_tick: -333
+    safe_q_min_rad: -0.012271846303223
+    safe_q_max_rad: 3.330272290499778
+  wrist_flex:
+    id: 4
+    model: sts3250
+    zero_tick: null
+    reference_tick: 3129
+    reference_q_rad: 1.5
+    sign: 1
+    positive_direction_sample_tick: 2325
+    positive_direction_delta_tick: 236
+    safe_q_max_rad: 1.582834962545933
+    safe_q_min_rad: -1.669204307772067
+  wrist_yaw:
+    id: 5
+    model: sts3250
+    zero_tick: null
+    reference_tick: 2050
+    reference_q_rad: 0.0
+    sign: 1
+    positive_direction_sample_tick: 2709
+    positive_direction_delta_tick: 662
+    safe_q_min_rad: -1.477223498733657
+    safe_q_max_rad: 1.475689517946343
+    center_validation:
+      status: confirmed_mapping_reference
+      date: "2026-08-14"
+      reference_tick: 2050
+      reference_q_rad: 0.0
+  wrist_roll:
+    id: 6
+    model: sts3250
+    zero_tick: null
+    reference_tick: 2106
+    reference_q_rad: 0.0
+    sign: -1
+    positive_direction_sample_tick: 1702
+    positive_direction_delta_tick: -355
+  gripper:
+    id: 7
+    model: sts3250
+    closed_tick: 2048
+    open_tick: 3432
+    reference_tick: 2048
+    reference_q_rad: 0.32
+    sign: -1
+    joint_per_encoder_ratio: 1.0
+    urdf_closed_rad: 0.32
+    urdf_open_rad: -1.8030294104
+reference_capture:
+  source: installed_right_arm_present_position_at_physical_folded_home
+  ticks: [2041, 969, 3074, 3129, 2050, 2106]
+  q_rad:
+  - 0.0
+  - 0.0
+  - 0.0
+  - 1.5
+  - 0.0
+  - 0.0
+  note: Operator-confirmed physical folded Home bound to the matching CAD Home.
+stowed_capture:
+  captured_at: "2026-08-17T11:45:52+09:00"
+  source: installed_right_arm_present_position_at_folded_home
+  device: /dev/ttyACM0
+  ticks: [2041, 969, 3074, 3129, 2050, 2106]
+gripper_capture:
+  closed:
+    tick: 2049
+    timestamp_unix: 1786070524.9040287
+  open:
+    tick: 3432
+    timestamp_unix: 1786070632.961292
+gripper_reference_override:
+  reference_tick: 2048
+  reference_q_rad: 0.32
+  source: operator_confirmed_nominal_closed_position
+  note: Original read-only closed capture was 2049; the accepted design reference is 2048.

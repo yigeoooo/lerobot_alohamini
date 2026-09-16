@@ -9,11 +9,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-
-URDF_PATH = (
-    Path(__file__).parents[2]
-    / "src/lerobot/vr_gateway/assets/alohamini2pro/urdf/alohamini2pro.urdf"
-)
+URDF_PATH = Path(__file__).parents[2] / "src/lerobot/vr_gateway/assets/alohamini2pro/urdf/alohamini2pro.urdf"
 
 
 class _FakeFrameTask:
@@ -93,7 +89,7 @@ class _FakeRobot:
             "base_x",
         ]
         self._frames = ["left_Moving_Jaw", "right_Moving_Jaw"]
-        self._joint_values = {name: 0.0 for name in self._joint_names}
+        self._joint_values = dict.fromkeys(self._joint_names, 0.0)
         self.state = types.SimpleNamespace(q=np.zeros(len(self._joint_names), dtype=float))
 
     def joint_names(self):
@@ -114,14 +110,14 @@ class _FakeRobot:
     def update_kinematics(self):
         return None
 
-    def get_T_world_frame(self, frame_name):
+    def get_T_world_frame(self, frame_name):  # noqa: N802 - mirrors placo API
         idx = 0 if frame_name.startswith("left") else 1
-        T = np.eye(4)
-        T[0, 3] = 0.2 + 0.01 * idx
-        T[1, 3] = 0.1 * idx
-        T[2, 3] = 0.3
-        T[:3, :3] = np.eye(3)
-        return T
+        transform = np.eye(4)
+        transform[0, 3] = 0.2 + 0.01 * idx
+        transform[1, 3] = 0.1 * idx
+        transform[2, 3] = 0.3
+        transform[:3, :3] = np.eye(3)
+        return transform
 
 
 @pytest.fixture
@@ -157,10 +153,10 @@ def test_pose_to_matrix_uses_xyzw_quaternion_order(arm_ik_module):
         "position": [1.0, 2.0, 3.0],
         "orientation": [0.0, 0.0, 1.0, 0.0],
     }
-    T = arm_ik_module.pose_to_matrix(pose)
-    assert T is not None
-    np.testing.assert_allclose(T[:3, 3], [1.0, 2.0, 3.0])
-    np.testing.assert_allclose(T[:3, :3], np.diag([-1.0, -1.0, 1.0]), atol=1e-7)
+    transform = arm_ik_module.pose_to_matrix(pose)
+    assert transform is not None
+    np.testing.assert_allclose(transform[:3, 3], [1.0, 2.0, 3.0])
+    np.testing.assert_allclose(transform[:3, :3], np.diag([-1.0, -1.0, 1.0]), atol=1e-7)
 
 
 def test_compose_target_applies_relative_delta_from_origin(arm_ik_module):
@@ -175,18 +171,15 @@ def test_compose_target_applies_relative_delta_from_origin(arm_ik_module):
     np.testing.assert_allclose(target[:3, :3], np.eye(3))
 
 
-def test_compose_target_composes_relative_rotation_onto_home(arm_ik_module):
-    """The orientation mapping matches ``current * inverse(origin) * home``."""
-    def z_rotation(angle):
-        c, s = np.cos(angle), np.sin(angle)
-        return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
-
+def test_compose_target_maps_world_rotation_onto_home(arm_ik_module):
+    """World-relative rotation uses the same aligned basis as translation."""
     home = np.eye(4)
-    home[:3, :3] = z_rotation(-0.3)
+    home[:3, :3] = arm_ik_module.rotation_exp(np.array([0.2, -0.3, 0.1]))
     origin = np.eye(4)
-    origin[:3, :3] = z_rotation(0.4)
+    origin[:3, :3] = arm_ik_module.rotation_exp(np.array([0.4, 0.2, -0.1]))
+    local_roll = arm_ik_module.rotation_exp(np.array([np.deg2rad(45.0), 0.0, 0.0]))
     current = np.eye(4)
-    current[:3, :3] = z_rotation(1.1)
+    current[:3, :3] = origin[:3, :3] @ local_roll
 
     target = arm_ik_module.compose_target(home, origin, current, np.eye(3))
     expected = current[:3, :3] @ origin[:3, :3].T @ home[:3, :3]
