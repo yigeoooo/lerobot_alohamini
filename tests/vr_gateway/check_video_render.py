@@ -2,7 +2,7 @@
 
 Requires Chrome/Chromium and websockets. Serves only the real static UI; no robot
 gateway, camera or headset is opened. Pixel readback exercises A-Frame's complete
-scene after camera resolution changes, including the optional 180-degree view.
+scene for every camera selection after resolution changes and 180-degree rotation.
 """
 
 import asyncio
@@ -22,45 +22,71 @@ import websockets
 STATIC = Path(__file__).resolve().parents[2] / "src/lerobot/vr_gateway/static"
 PIXEL_CHECK = """(async () => {
   const scene = document.querySelector('a-scene');
-  const image = document.getElementById('view');
+  const names = ['forward', 'wrist_left', 'wrist_right'];
+  const palettes = [
+    ['red', 'lime', 'blue', 'yellow'], ['cyan', 'magenta', 'white', 'red'],
+    ['blue', 'white', 'red', 'lime']
+  ];
   scene.pause();
   const renderer = scene.renderer;
-  const target = new AFRAME.THREE.WebGLRenderTarget(400, 300);
+  const size = 900;
+  const target = new AFRAME.THREE.WebGLRenderTarget(size, size);
   const camera = scene.camera;
-  camera.aspect = 400 / 300;
+  camera.aspect = 1;
   camera.updateProjectionMatrix();
   const results = [];
   try {
-    for (const [width, height, rotation] of [
-      [640, 480, 0], [1280, 720, 0], [480, 360, 0], [1280, 720, 0],
-      [1280, 720, 180], [1280, 720, 0]
-    ]) {
-      const source = document.createElement('canvas');
-      source.width = width; source.height = height;
-      const ctx = source.getContext('2d');
-      for (const [color, x, y] of [
-        ['red', 0, 0], ['lime', width / 2, 0],
-        ['blue', 0, height / 2], ['yellow', width / 2, height / 2]
+    for (let mask = 0; mask < 8; mask++) {
+      const selected = names.filter((_, index) => mask & (1 << index));
+      window.testSocket.onmessage({data: JSON.stringify({type: 'hello', cameras: selected})});
+      for (const [width, height, rotation] of [
+        [640, 480, 0], [1280, 720, 0], [480, 360, 0], [1280, 720, 0],
+        [1280, 720, 180], [1280, 720, 0]
       ]) {
-        ctx.fillStyle = color; ctx.fillRect(x, y, width / 2, height / 2);
+        await Promise.all(selected.map(async (name) => {
+          const source = document.createElement('canvas');
+          const w = name === 'forward' ? width : Math.min(width, 640);
+          const h = name === 'forward' ? height : w * 3 / 4;
+          source.width = w; source.height = h;
+          const ctx = source.getContext('2d');
+          palettes[names.indexOf(name)].forEach((color, index) => {
+            ctx.fillStyle = color;
+            ctx.fillRect((index % 2) * w / 2, Math.floor(index / 2) * h / 2, w / 2, h / 2);
+          });
+          const image = document.getElementById(`${name}-view`);
+          await new Promise((resolve, reject) => {
+            image.addEventListener('load', resolve, {once: true});
+            image.addEventListener('error', reject, {once: true});
+            // PNG pixels are lossless; the same image load/texture path handles JPEG.
+            image.src = source.toDataURL();
+          });
+        }));
+        document.getElementById('video-rotation').value = String(rotation);
+        document.getElementById('settings-form').dispatchEvent(new Event('submit', {cancelable: true}));
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        scene.object3D.updateMatrixWorld(true);
+        renderer.setRenderTarget(target);
+        renderer.setViewport(0, 0, size, size);
+        renderer.render(scene.object3D, camera);
+        const pixels = new Uint8Array(size * size * 4);
+        renderer.readRenderTargetPixels(target, 0, 0, size, size, pixels);
+        const samples = selected.map((name) => {
+          const plane = document.getElementById(`${name}-plane`);
+          const corners = [[-1, 1], [1, 1], [-1, -1], [1, -1]].map(([x, y]) => {
+            const point = new AFRAME.THREE.Vector3(
+              x * plane.getAttribute('width') / 4, y * plane.getAttribute('height') / 4, 0);
+            plane.object3D.localToWorld(point); point.project(camera);
+            const px = Math.floor((point.x + 1) * size / 2);
+            const py = Math.floor((point.y + 1) * size / 2);
+            if (px < 0 || px >= size || py < 0 || py >= size) throw Error(`offscreen: ${name}`);
+            const offset = (py * size + px) * 4;
+            return Array.from(pixels.slice(offset, offset + 3));
+          });
+          return {name, corners};
+        });
+        results.push({width, height, rotation, error: renderer.getContext().getError(),
+          mask, samples, visible: names.filter(name => document.getElementById(`${name}-plane`).object3D.visible)});
       }
-      await new Promise((resolve, reject) => {
-        image.addEventListener('load', resolve, {once: true});
-        image.addEventListener('error', reject, {once: true});
-        image.src = source.toDataURL();
-      });
-      document.getElementById('video-rotation').value = String(rotation);
-      document.getElementById('settings-form').dispatchEvent(new Event('submit', {cancelable: true}));
-      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-      scene.object3D.updateMatrixWorld(true);
-      renderer.setRenderTarget(target);
-      renderer.setViewport(0, 0, 400, 300);
-      renderer.render(scene.object3D, camera);
-      const pixels = new Uint8Array(400 * 300 * 4);
-      renderer.readRenderTargetPixels(target, 0, 0, 400, 300, pixels);
-      const at = (x, y) => Array.from(pixels.slice((y * 400 + x) * 4, (y * 400 + x) * 4 + 3));
-      results.push({width, height, rotation, error: renderer.getContext().getError(),
-        corners: [at(155, 180), at(245, 180), at(155, 120), at(245, 120)]});
     }
   } finally {
     renderer.setRenderTarget(null); target.dispose();
@@ -97,11 +123,25 @@ async def check_pixels(port, page_url):
                     assert "exceptionDetails" not in result, result
                     return result
 
+        await call("Page.enable")
+        await call(
+            "Page.addScriptToEvaluateOnNewDocument",
+            source="""
+            window.WebSocket = class {
+              static OPEN = 1;
+              constructor() {
+                this.readyState = 1; window.testSocket = this;
+                setTimeout(() => this.onopen?.(), 0);
+              }
+              send() {}
+            };
+        """,
+        )
         await call("Page.navigate", url=page_url)
         for _ in range(100):
             ready = await call(
                 "Runtime.evaluate",
-                expression="!!document.querySelector('a-scene')?.renderer && !!document.getElementById('view')?.onload",
+                expression="!!document.querySelector('a-scene')?.renderer && !!window.testSocket?.onmessage",
                 returnByValue=True,
             )
             if ready["result"].get("value"):
@@ -111,12 +151,27 @@ async def check_pixels(port, page_url):
             raise AssertionError("A-Frame/application did not load")
         result = await call("Runtime.evaluate", expression=PIXEL_CHECK, awaitPromise=True, returnByValue=True)
         rows = result["result"].get("value")
-        assert isinstance(rows, list) and len(rows) == 6, result
-        colors = [[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 0]]
+        assert isinstance(rows, list) and len(rows) == 48, result
+        colors = {
+            "forward": [[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 0]],
+            "wrist_left": [[0, 255, 255], [255, 0, 255], [255, 255, 255], [255, 0, 0]],
+            "wrist_right": [[0, 0, 255], [255, 255, 255], [255, 0, 0], [0, 255, 0]],
+        }
         for row in rows:
-            expected = colors if row["rotation"] == 0 else colors[::-1]
-            assert row["error"] == 0 and row["corners"] == expected, row
-            print(f"PASS {row['width']}x{row['height']} rotation={row['rotation']}: four correct corners")
+            selected = [name for i, name in enumerate(colors) if row["mask"] & (1 << i)]
+            assert row["visible"] == selected, row
+            assert row["error"] == 0, row
+            for sample in row["samples"]:
+                expected = colors[sample["name"]]
+                if row["rotation"] == 180:
+                    expected = expected[::-1]
+                # Shader output dithering can move an 8-bit channel by one level.
+                assert all(
+                    abs(actual - wanted) <= 2
+                    for pixel, reference in zip(sample["corners"], expected, strict=True)
+                    for actual, wanted in zip(pixel, reference, strict=True)
+                ), row
+        print("PASS: all 8 camera selections × 6 resolution/rotation cases, correct pixels and no GPU errors")
 
 
 def main():

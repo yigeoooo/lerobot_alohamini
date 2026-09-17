@@ -2,7 +2,7 @@
 
 The gateway deliberately keeps arm IK out of the transport layer.  Arm messages are
 accepted as an extension point, while current arm targets are held when sending base
-or lift commands.  Only the ``forward`` camera is ever emitted to the browser.
+or lift commands. Head and wrist cameras are enabled individually at startup.
 
 Transport design
 ----------------
@@ -53,6 +53,10 @@ def _parse_bool(value: str | bool) -> bool:
     raise ValueError(f"invalid boolean value: {value!r}; use true or false")
 
 
+def _parse_camera_device(value: str) -> int | Path:
+    return int(value) if value.isdecimal() else Path(value)
+
+
 # Feetech degree commands for joints whose encoder direction differs from the URDF
 # axes. The wrist-roll encoder direction is inverted on both arms per the installed
 # ROS2 hardware calibration.
@@ -85,7 +89,7 @@ class RobotLike(Protocol):
 
     def connect(self) -> None: ...
     def disconnect(self) -> None: ...
-    def get_observation(self) -> dict[str, Any]: ...
+    def get_observation(self, *, include_cameras: bool = True) -> dict[str, Any]: ...
     def send_action(self, action: dict[str, Any]) -> dict[str, Any]: ...
 
 
@@ -107,7 +111,7 @@ class VRGatewayConfig:
     # Camera frames are emitted at most this often, independently of state polling.
     video_hz: float = 10.0
     watchdog_timeout_s: float = 1.0
-    camera_name: str = "forward"
+    camera_names: tuple[str, ...] = ()
     jpeg_quality: int = 90
     # Preserve the VR camera's 720p details. Encoding stays outside the robot lock;
     # retain CLI overrides for slower links without upscaling smaller sources.
@@ -181,8 +185,12 @@ def make_vr_robot_config(
     arm_goal_velocity: int | None = None,
     arm_acceleration: int = VR_ARM_ACCELERATION,
     max_relative_target: float | None = None,
+    head_camera: int | str | Path | None = None,
+    left_wrist_camera: int | str | Path | None = None,
+    right_wrist_camera: int | str | Path | None = None,
 ):
     """Use the old actuator settings by default; retain calibrated mode explicitly."""
+    from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig
     from lerobot.robots.alohamini.config_alohamini import AlohaMiniConfig
 
     if arm_ik_mode not in {"legacy", "calibrated"}:
@@ -201,14 +209,22 @@ def make_vr_robot_config(
         arm_goal_velocity=arm_goal_velocity,
         arm_acceleration=arm_acceleration,
         max_relative_target=max_relative_target,
+        cameras={
+            name: OpenCVCameraConfig(
+                index_or_path=_parse_camera_device(str(device)),
+                fps=30,
+                width=1280 if name == "forward" else 640,
+                height=720 if name == "forward" else 480,
+                fourcc="MJPG",
+            )
+            for name, device in (
+                ("forward", head_camera),
+                ("wrist_left", left_wrist_camera),
+                ("wrist_right", right_wrist_camera),
+            )
+            if device is not None
+        },
     )
-    # VR opens only the head/forward camera; wrist cameras remain untouched.
-    config.cameras = {"forward": config.cameras["forward"]}
-    # Confirmed on the installed UVC camera: MJPG supports 1280x720 at 30 fps;
-    # uncompressed YUYV at this resolution is limited to 10 fps.
-    config.cameras["forward"].width = 1280
-    config.cameras["forward"].height = 720
-    config.cameras["forward"].fourcc = "MJPG"
     return config
 
 
@@ -940,7 +956,7 @@ class VRGateway:
     def capture_observation(self) -> dict[str, Any]:
         """Read the robot.  Must run under the robot lock; does no encoding."""
         started_at = time.monotonic()
-        observation = self.robot.get_observation()
+        observation = self.robot.get_observation(include_cameras=False)
         # Timestamp acquisition start, not the end of camera retrieval/encoding.
         timing = observation.get("_host_timing", {})
         self._state_sampled_at = float(timing.get("state_sample_started_monotonic_s", started_at))
@@ -976,6 +992,17 @@ class VRGateway:
                         self._warn("torque_read", "[VR] torque readback unavailable")
         return observation
 
+    def capture_camera_frames(self) -> dict[str, Any]:
+        """Peek each enabled camera outside the robot lock; isolate missing/stale feeds."""
+        frames = {}
+        cameras = getattr(self.robot, "cameras", {})
+        for name in self.config.camera_names:
+            try:
+                frames[name] = cameras[name].read_latest(max_age_ms=500)
+            except Exception as exc:
+                self._warn(f"camera_{name}", "[VR] camera %s unavailable: %s", name, exc)
+        return frames
+
     def encode_payload(self, observation: dict[str, Any], *, include_frame: bool = True) -> dict[str, Any]:
         """Serialise an observation for the browser.  Safe to run outside the robot lock.
 
@@ -984,11 +1011,16 @@ class VRGateway:
         """
         payload: dict[str, Any] = {
             "type": "observation",
-            "camera": self.config.camera_name,
+            "cameras": list(self.config.camera_names),
             "state": {k: _json_safe(v) for k, v in observation.items() if not isinstance(v, np.ndarray)},
+            "frames": {},
         }
-        frame = observation.get(self.config.camera_name)
-        if include_frame and isinstance(frame, np.ndarray):
+        if not include_frame:
+            return payload
+        for name in self.config.camera_names:
+            frame = observation.get(name)
+            if not isinstance(frame, np.ndarray):
+                continue
             try:
                 import cv2
 
@@ -1003,16 +1035,18 @@ class VRGateway:
                     ".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), self.config.jpeg_quality]
                 )
                 if ok:
-                    payload["jpeg_b64"] = base64.b64encode(encoded.tobytes()).decode("ascii")
-                    payload["video_width"] = frame.shape[1]
-                    payload["video_height"] = frame.shape[0]
+                    payload["frames"][name] = {
+                        "jpeg_b64": base64.b64encode(encoded.tobytes()).decode("ascii"),
+                        "video_width": frame.shape[1],
+                        "video_height": frame.shape[0],
+                    }
             except Exception:  # pragma: no cover - camera/codec is platform specific
-                logger.exception("failed to encode forward camera frame")
+                self._warn(f"encode_{name}", "[VR] failed to encode camera %s", name)
         return payload
 
     def observation_payload(self) -> dict[str, Any]:
         """Read the robot and serialise it in one step (used by tests and simple callers)."""
-        return self.encode_payload(self.capture_observation())
+        return self.encode_payload({**self.capture_observation(), **self.capture_camera_frames()})
 
     def status_payload(self) -> dict[str, Any]:
         """Operator-visible gateway health, sent periodically instead of per-message acks."""
@@ -1137,7 +1171,7 @@ def create_app(robot: RobotLike, config: VRGatewayConfig | None = None, arm_ik: 
         return {
             "ok": True,
             "robot_connected": bool(getattr(robot, "is_connected", False)),
-            "camera": gateway.config.camera_name,
+            "cameras": list(gateway.config.camera_names),
             **gateway.stats.as_dict(),
         }
 
@@ -1155,8 +1189,8 @@ def create_app(robot: RobotLike, config: VRGatewayConfig | None = None, arm_ik: 
             await websocket.send_json(
                 {
                     "type": "hello",
-                    "camera": gateway.config.camera_name,
-                    "protocol": 3,
+                    "cameras": list(gateway.config.camera_names),
+                    "protocol": 4,
                     "control_hz": gateway.config.control_hz,
                 }
             )
@@ -1176,8 +1210,11 @@ def create_app(robot: RobotLike, config: VRGatewayConfig | None = None, arm_ik: 
                 last_status = 0.0
                 last_limits = None
                 while True:
+                    started_at = time.monotonic()
                     observation = await robot_io(gateway.capture_observation)
                     include_frame = tick % frames_per_video == 0
+                    if include_frame:
+                        observation.update(await asyncio.to_thread(gateway.capture_camera_frames))
                     payload = await asyncio.to_thread(
                         gateway.encode_payload, observation, include_frame=include_frame
                     )
@@ -1192,7 +1229,7 @@ def create_app(robot: RobotLike, config: VRGatewayConfig | None = None, arm_ik: 
                         last_limits = status["joint_limit_warnings"]
                         await send_json(status)
                     tick += 1
-                    await asyncio.sleep(interval)
+                    await asyncio.sleep(max(0.0, interval - (time.monotonic() - started_at)))
 
             async def receive_loop():
                 while True:
@@ -1272,6 +1309,20 @@ def main() -> None:  # pragma: no cover - CLI convenience
     )
     parser.add_argument("--left-port", default="/dev/am_arm_follower_left")
     parser.add_argument("--right-port", default="/dev/am_arm_follower_right")
+    for option, device in (
+        ("head-camera", "/dev/am_camera_forward"),
+        ("left-wrist-camera", "/dev/am_camera_wrist_left"),
+        ("right-wrist-camera", "/dev/am_camera_wrist_right"),
+    ):
+        parser.add_argument(
+            f"--{option}",
+            nargs="?",
+            const=device,
+            default=None,
+            type=_parse_camera_device,
+            metavar="DEVICE",
+            help=f"enable camera (default device: {device}); omitted means disabled",
+        )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--ws", choices=["auto", "websockets", "wsproto"], default="auto")
@@ -1334,6 +1385,9 @@ def main() -> None:  # pragma: no cover - CLI convenience
         arm_goal_velocity=args.arm_goal_velocity,
         arm_acceleration=args.arm_acceleration,
         max_relative_target=args.max_relative_target_deg,
+        head_camera=args.head_camera,
+        left_wrist_camera=args.left_wrist_camera,
+        right_wrist_camera=args.right_wrist_camera,
     )
     robot = AlohaMini(robot_config)
     arm_ik = make_vr_arm_ik(
@@ -1360,7 +1414,7 @@ def main() -> None:  # pragma: no cover - CLI convenience
         arm_ik.tip_frames,
     )
     gateway_config = VRGatewayConfig(
-        camera_name="forward",
+        camera_names=tuple(robot_config.cameras),
         control_hz=args.control_hz,
         poll_hz=args.poll_hz,
         video_hz=args.video_hz,

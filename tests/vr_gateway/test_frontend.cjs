@@ -10,11 +10,14 @@ function browser() {
   const packets = [];
   const elements = new Map();
   const listeners = {};
-  const ctx = new Proxy({}, { get: () => () => {} });
+  const timers = [];
+  const drawings = [];
+  const ctx = new Proxy({}, { get: (_, method) => (...args) => drawings.push({ method, args }) });
   function element(id) {
     if (!elements.has(id)) elements.set(id, {
-      textContent: '', dataset: {}, style: {}, value: '',
-      getContext: () => ctx, getObject3D: () => null, setAttribute() {},
+      textContent: '', dataset: {}, style: {}, value: '', attributes: {}, width: 640, height: 480,
+      getContext: () => ctx, getObject3D: () => null,
+      setAttribute(name, value) { this.attributes[name] = value; },
       querySelector: (name) => element(id + name),
       object3D: { position: { fromArray() {} }, quaternion: { fromArray() {} } },
       addEventListener: (name, fn) => { listeners[name] = fn; },
@@ -42,7 +45,7 @@ function browser() {
     document: { getElementById: element, querySelector: () => scene, body: { classList: { add() {}, remove() {} } } },
     window: {}, WebSocket: Socket, location: { protocol: 'http:', host: 'localhost' },
     navigator: {}, performance: { now: () => now, timeOrigin: 1700000000000 },
-    console: { info() {} }, setInterval() {}, setTimeout() {},
+    console: { info() {} }, setInterval(fn) { timers.push(fn); }, setTimeout() {},
     AFRAME: { registerComponent: (_, component) => { tick = component.tick.bind({ el: scene }); } },
   };
   context.window.AFRAME = context.AFRAME;
@@ -52,7 +55,13 @@ function browser() {
     feedback_age_ms: 0, arms: {}, arm_mapping_loaded: true }) });
   listeners['enter-vr']();
   return {
-    packets, sources, context, frame, element,
+    packets, sources, context, frame, element, drawings,
+    receive(message) { Socket.instance.onmessage({ data: JSON.stringify(message) }); },
+    loadCamera(name, width = 640, height = 480) {
+      const image = element(`${name}-view`);
+      image.naturalWidth = width; image.naturalHeight = height; image.onload();
+    },
+    elapse(dt) { now += dt; timers.forEach((fn) => fn()); },
     reconnect() { Socket.instance.onclose({ code: 1000 }); Socket.instance.onopen(); },
     status(message) { Socket.instance.onmessage({ data: JSON.stringify({ type: 'status', feedback_fresh: true, ...message }) }); },
     step(dt = 41) { now += dt; tick(); },
@@ -70,6 +79,79 @@ test('Legacy reports loaded Home without changing the displayed control mode', (
   assert.equal(ui.element('mapping-state').textContent, 'Legacy · Home 零位已加载');
   ui.status({ arm_ik_mode: 'legacy', arm_mapping_loaded: false });
   assert.equal(ui.element('mapping-state').textContent, 'Legacy · 缺少 Home 零位');
+});
+
+test('camera selection handles all subsets and routes three feeds to their own VR textures', () => {
+  const ui = browser();
+  const names = ['forward', 'wrist_left', 'wrist_right'];
+  for (let mask = 0; mask < 8; mask++) {
+    const selected = names.filter((_, index) => mask & (1 << index));
+    ui.receive({ type: 'hello', cameras: selected });
+    assert.equal(ui.element('camera-empty').hidden, selected.length > 0);
+    for (const name of names) {
+      assert.equal(ui.element(`${name}-tile`).hidden, !selected.includes(name));
+      assert.equal(ui.element(`${name}-plane`).attributes.visible, selected.includes(name));
+    }
+  }
+  ui.receive({ type: 'observation', cameras: names, frames: {
+    forward: { jpeg_b64: 'head' }, wrist_left: { jpeg_b64: 'left' }, wrist_right: { jpeg_b64: 'right' },
+  } });
+  names.forEach((name, index) => {
+    assert.equal(ui.element(`${name}-view`).src, `data:image/jpeg;base64,${['head', 'left', 'right'][index]}`);
+    ui.loadCamera(name, index === 0 ? 1280 : 640, index === 0 ? 720 : 480);
+    assert.equal(ui.element(`${name}-view`).hidden, false);
+    assert.equal(ui.element(`${name}-texture`).width, index === 0 ? 1280 : 640);
+    assert.ok(ui.drawings.some(({ method, args }) => method === 'drawImage' && args[0] === ui.element(`${name}-view`)));
+  });
+  const positions = names.map((name) => ui.element(`${name}-plane`).attributes.position.split(' ').map(Number));
+  assert.ok(positions[0][1] > positions[1][1]);
+  assert.ok(positions[1][0] < positions[2][0]);
+  assert.equal(positions[1][1], positions[2][1]);
+  ui.receive({ cameras: ['wrist_right'], frames: { forward: { jpeg_b64: 'ignored' } } });
+  assert.equal(ui.element('forward-view').src, 'data:image/jpeg;base64,head');
+  assert.equal(ui.element('wrist_right-plane').attributes.position, '0 0 -1.5');
+});
+
+test('each camera independently expires, recovers and keeps only the newest pending JPEG', () => {
+  const ui = browser();
+  const cameras = ['forward', 'wrist_left'];
+  ui.receive({ cameras, frames: { forward: { jpeg_b64: 'head' }, wrist_left: { jpeg_b64: 'first' } } });
+  ui.receive({ frames: { wrist_left: { jpeg_b64: 'skipped' } } });
+  ui.receive({ frames: { wrist_left: { jpeg_b64: 'latest' } } });
+  assert.equal(ui.element('wrist_left-view').src, 'data:image/jpeg;base64,first');
+  ui.loadCamera('wrist_left');
+  assert.equal(ui.element('wrist_left-view').src, 'data:image/jpeg;base64,latest');
+  ui.loadCamera('wrist_left'); ui.loadCamera('forward');
+  ui.elapse(1000);
+  ui.receive({ frames: { forward: { jpeg_b64: 'fresh' } } }); ui.loadCamera('forward');
+  ui.elapse(600);
+  assert.equal(ui.element('wrist_left-state').textContent, '画面已过期');
+  assert.equal(ui.element('wrist_left-view').hidden, true);
+  assert.match(ui.element('forward-state').textContent, /实时/);
+  assert.ok(ui.drawings.some(({ method, args }) => method === 'fillText' && /左腕.*画面已过期/.test(args[0])));
+  ui.receive({ frames: { wrist_left: { jpeg_b64: 'recovered' } } }); ui.loadCamera('wrist_left');
+  assert.equal(ui.element('wrist_left-view').hidden, false);
+  ui.receive({ frames: { wrist_left: { jpeg_b64: 'bad' } } }); ui.element('wrist_left-view').onerror();
+  assert.equal(ui.element('wrist_left-state').textContent, '画面解码失败');
+  ui.reconnect();
+  assert.equal(ui.element('forward-view').hidden, true);
+});
+
+test('resizing each camera releases its own GPU texture before upload', () => {
+  const ui = browser();
+  const cameras = ['forward', 'wrist_left', 'wrist_right'];
+  ui.receive({ cameras });
+  for (const name of cameras) {
+    let disposed = 0;
+    const map = { dispose() { disposed++; }, needsUpdate: false };
+    ui.element(`${name}-plane`).getObject3D = () => ({ material: { map } });
+    ui.receive({ frames: { [name]: { jpeg_b64: name } } });
+    ui.loadCamera(name, 1280, 720);
+    assert.equal(disposed, 1);
+    assert.equal(map.needsUpdate, true);
+    ui.loadCamera(name, 1280, 720);
+    assert.equal(disposed, 1);
+  }
 });
 
 test('Trigger defaults closed, opens while pressed, closes on release; Grip stays independent', () => {

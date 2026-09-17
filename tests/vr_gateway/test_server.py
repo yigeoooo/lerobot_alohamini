@@ -23,7 +23,8 @@ class _RobotStub:
     def disconnect(self):
         return None
 
-    def get_observation(self):
+    def get_observation(self, *, include_cameras=True):
+        assert include_cameras is False
         return {
             "arm_left_shoulder_pan.pos": 0.0,
             "arm_left_shoulder_lift.pos": 0.0,
@@ -83,8 +84,74 @@ def test_vr_robot_config_selects_complete_actuator_profile(mode, velocity, lead)
     assert config.arm_goal_velocity == velocity
     assert config.arm_acceleration == 100
     assert config.max_relative_target == lead
-    assert (config.cameras["forward"].width, config.cameras["forward"].height) == (1280, 720)
-    assert config.cameras["forward"].fourcc == "MJPG"
+    assert config.cameras == {}
+
+
+@pytest.mark.parametrize("mask", range(8))
+def test_camera_selection_only_opens_explicit_devices(mask):
+    from pathlib import Path
+
+    options = {"head_camera": "/dev/head", "left_wrist_camera": "/dev/left", "right_wrist_camera": 2}
+    selected = {name: device for i, (name, device) in enumerate(options.items()) if mask & (1 << i)}
+    config = make_vr_robot_config(
+        robot_model="alohamini2pro", left_port="/dev/left", right_port="/dev/right", **selected
+    )
+    names = ("forward", "wrist_left", "wrist_right")
+    assert list(config.cameras) == [name for i, name in enumerate(names) if mask & (1 << i)]
+    for name, camera in config.cameras.items():
+        assert (camera.width, camera.height) == ((1280, 720) if name == "forward" else (640, 480))
+        assert camera.fps == 30
+        assert camera.fourcc == "MJPG"
+        assert (
+            camera.index_or_path
+            == {"forward": Path("/dev/head"), "wrist_left": Path("/dev/left"), "wrist_right": 2}[name]
+        )
+
+
+@pytest.mark.parametrize(
+    "args,devices",
+    [
+        ([], {}),
+        (
+            ["--head-camera", "--left-wrist-camera", "--right-wrist-camera"],
+            {
+                "forward": "/dev/am_camera_forward",
+                "wrist_left": "/dev/am_camera_wrist_left",
+                "wrist_right": "/dev/am_camera_wrist_right",
+            },
+        ),
+        (
+            ["--left-wrist-camera", "/dev/video8", "--right-wrist-camera", "2"],
+            {
+                "wrist_left": "/dev/video8",
+                "wrist_right": "2",
+            },
+        ),
+    ],
+)
+def test_camera_cli_passes_selected_devices_to_robot_and_gateway(monkeypatch, args, devices):
+    from lerobot.robots.alohamini import alohamini
+    from lerobot.vr_gateway import server
+
+    configs = []
+
+    def robot(config):
+        configs.append(config)
+        return SimpleNamespace(calibration={})
+
+    monkeypatch.setattr(alohamini, "AlohaMini", robot)
+    monkeypatch.setattr(
+        server, "make_vr_arm_ik", lambda *a, **k: SimpleNamespace(position_scale=0.5, tip_frames={})
+    )
+    monkeypatch.setattr(server, "create_app", lambda robot, config, **k: config)
+    runs = []
+    monkeypatch.setattr("uvicorn.run", lambda app, **k: runs.append(app))
+    monkeypatch.setattr(sys, "argv", ["vr_gateway", *args])
+    # main sets this flag; restore the process environment after the test.
+    monkeypatch.setenv("LEROBOT_VR_DIAGNOSTICS", "0")
+    server.main()
+    assert {name: str(camera.index_or_path) for name, camera in configs[0].cameras.items()} == devices
+    assert runs[0].camera_names == tuple(devices)
 
 
 def test_reanchor_message_is_staged_and_reported():
@@ -167,36 +234,98 @@ def test_encode_payload_converts_rgb_frame_to_bgr_before_jpeg(monkeypatch):
 
     cv2 = _CV2()
     monkeypatch.setitem(sys.modules, "cv2", cv2)
-    gateway = VRGateway(_RobotStub(), VRGatewayConfig(max_frame_width=0))
+    gateway = VRGateway(_RobotStub(), VRGatewayConfig(camera_names=("forward",), max_frame_width=0))
     frame = np.array([[[255, 0, 0]], [[0, 255, 0]]], dtype=np.uint8)
 
     payload = gateway.encode_payload({"forward": frame})
 
-    assert payload["jpeg_b64"] == "anBlZw=="
+    assert cv2.converted is not None
+    assert payload["frames"]["forward"]["jpeg_b64"] == "anBlZw=="
 
 
 def test_video_preserves_720p_detail_and_does_not_upscale_smaller_frames():
     import base64
 
     cv2 = pytest.importorskip("cv2")
-    gateway = VRGateway(_RobotStub())
+    gateway = VRGateway(_RobotStub(), VRGatewayConfig(camera_names=("forward",)))
     # Fine grayscale lines reveal both downscaling and excessive JPEG losses.
     columns = np.where(np.arange(1280) % 8 < 4, 32, 224).astype(np.uint8)
     frame = np.repeat(np.tile(columns, (720, 1))[:, :, None], 3, axis=2)
-    encoded = gateway.encode_payload({"forward": frame})
+    encoded = gateway.encode_payload({"forward": frame})["frames"]["forward"]
     decoded = cv2.imdecode(np.frombuffer(base64.b64decode(encoded["jpeg_b64"]), np.uint8), cv2.IMREAD_COLOR)
     assert decoded.shape == frame.shape
     assert np.mean(np.abs(decoded.astype(float) - frame)) < 3
-    small = gateway.encode_payload({"forward": frame[:360, :480]})
+    small = gateway.encode_payload({"forward": frame[:360, :480]})["frames"]["forward"]
     assert (small["video_width"], small["video_height"]) == (480, 360)
+
+
+def test_three_camera_frames_keep_identity_colors_and_dimensions():
+    import base64
+
+    cv2 = pytest.importorskip("cv2")
+    names = ("forward", "wrist_left", "wrist_right")
+    gateway = VRGateway(_RobotStub(), VRGatewayConfig(camera_names=names, max_frame_width=64))
+    colors = ((255, 0, 0), (0, 255, 0), (0, 0, 255))
+    observation = {
+        name: np.full((60, 80, 3), color, np.uint8) for name, color in zip(names, colors, strict=True)
+    }
+    observation["arm_left_shoulder_pan.pos"] = 12.0
+    observation["unselected"] = np.zeros((20, 20, 3), np.uint8)
+    payload = gateway.encode_payload(observation)
+    assert payload["cameras"] == list(names)
+    assert payload["state"] == {"arm_left_shoulder_pan.pos": 12.0}
+    assert list(payload["frames"]) == list(names)
+    for name, color in zip(names, colors, strict=True):
+        encoded = payload["frames"][name]
+        assert (encoded["video_width"], encoded["video_height"]) == (64, 48)
+        decoded = cv2.imdecode(
+            np.frombuffer(base64.b64decode(encoded["jpeg_b64"]), np.uint8), cv2.IMREAD_COLOR
+        )
+        np.testing.assert_allclose(decoded.mean(axis=(0, 1)), color[::-1], atol=2)
+    assert gateway.encode_payload(observation, include_frame=False)["frames"] == {}
+    assert VRGateway(_RobotStub()).encode_payload(observation)["frames"] == {}
+    observation["wrist_left"] = np.array([], np.uint8)  # A bad frame cannot hide the other feeds.
+    assert set(gateway.encode_payload(observation)["frames"]) == {"forward", "wrist_right"}
+
+
+def test_camera_timeout_does_not_interrupt_feedback_other_cameras_or_control():
+    frame = np.zeros((4, 4, 3), np.uint8)
+    reads = []
+
+    def read(*, max_age_ms):
+        reads.append(max_age_ms)
+        return frame
+
+    def stale(**kwargs):
+        raise TimeoutError("camera is stale")
+
+    robot = _RobotStub()
+    robot.cameras = {
+        "forward": SimpleNamespace(read_latest=read),
+        "wrist_left": SimpleNamespace(read_latest=stale),
+        "wrist_right": SimpleNamespace(read_latest=read),
+    }
+    gateway = VRGateway(robot, VRGatewayConfig(camera_names=tuple(robot.cameras)))
+    assert "arm_left_shoulder_pan.pos" in gateway.capture_observation()
+    assert reads == []
+    assert set(gateway.capture_camera_frames()) == {"forward", "wrist_right"}
+    assert reads == [500, 500]
+    gateway.process_message({"type": "base", "x.vel": 0.1})
+    assert robot.sent[-1]["x.vel"] == 0.1
+    robot.cameras["wrist_left"].read_latest = read
+    assert set(gateway.capture_camera_frames()) == set(robot.cameras)
 
 
 @pytest.mark.parametrize("side", ["left", "right"])
 @pytest.mark.parametrize("home_loaded", [False, True])
 def test_legacy_gripper_keeps_motor_endpoints_with_or_without_home(side, home_loaded):
     class GripperRobot(_RobotStub):
-        def get_observation(self):
-            return {**super().get_observation(), "arm_left_gripper.pos": 5.0, "arm_right_gripper.pos": 6.0}
+        def get_observation(self, *, include_cameras=True):
+            return {
+                **super().get_observation(include_cameras=include_cameras),
+                "arm_left_gripper.pos": 5.0,
+                "arm_right_gripper.pos": 6.0,
+            }
 
     gateway = _session_gateway(GripperRobot())
     gateway.arm_ik.mode = "legacy"
@@ -495,7 +624,8 @@ def test_incomplete_feedback_release_uses_last_measured_position_not_leading_goa
     assert gateway.robot.sent[-1]["arm_left_shoulder_pan.pos"] == 0
 
 
-def test_websocket_reconnect_never_reconnects_robot_and_rejects_second_operator():
+@pytest.mark.parametrize("camera_names", [(), ("forward", "wrist_left", "wrist_right")])
+def test_websocket_reconnect_never_reconnects_robot_and_rejects_second_operator(camera_names):
     from fastapi.testclient import TestClient
 
     from lerobot.vr_gateway.server import create_app
@@ -511,10 +641,21 @@ def test_websocket_reconnect_never_reconnects_robot_and_rejects_second_operator(
             self.is_connected = True
 
     robot = ConnectingRobot()
-    with TestClient(create_app(robot, arm_ik=_SessionIK())) as client:
+    robot.cameras = {
+        name: SimpleNamespace(read_latest=lambda **kwargs: np.zeros((4, 4, 3), np.uint8))
+        for name in camera_names
+    }
+    config = VRGatewayConfig(camera_names=camera_names)
+    with TestClient(create_app(robot, config, arm_ik=_SessionIK())) as client:
         assert robot.connects == 1
+        assert client.get("/health").json()["cameras"] == list(camera_names)
         with client.websocket_connect("/ws") as socket:
-            assert socket.receive_json()["protocol"] == 3
+            hello = socket.receive_json()
+            assert hello["protocol"] == 4
+            assert hello["cameras"] == list(camera_names)
+            observation = socket.receive_json()
+            assert observation["type"] == "observation"
+            assert set(observation["frames"]) == set(camera_names)
             with client.websocket_connect("/ws") as other:
                 assert "Another operator" in other.receive_json()["error"]
         with client.websocket_connect("/ws") as socket:

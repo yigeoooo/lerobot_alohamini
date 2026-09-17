@@ -12,9 +12,9 @@ Home 将电机行程中点角度转换成真实 CAD 参考角度，左右臂的�
 
 legacy 的夹爪端点仍使用电机行程：沿用现有电机的 RANGE_0_100 行程，两侧均为增大值打开、减小值闭合。夹爪默认闭合，按住 Trigger 打开，按得越深打开越大，松开闭合，无需同时按 Grip。进入 VR 后有有效手柄追踪和健康反馈时即发送当前扳机目标；追踪丢失、暂停、急停或反馈失效时停止发送。电机夹持电流保护继续生效。
 
-VR 相机改为 1280×720 / 30 fps / MJPEG，推流保留 1280 像素宽、JPEG 质量 90、10 fps；不放大小尺寸来源。头显关闭固定注视点降采样并启用抗锯齿。树莓派实测单帧 JPEG 编码约 5.3 ms（中位数），当前实景样本含 base64 的 10 fps 数据量约 14.5 Mbps，具体随画面变化。编码保持在机器人控制锁外，CLI 的 `--max-frame-width` / `--jpeg-quality` 仍可覆盖。
+VR 现在支持头部、左腕、右腕三路相机，**仅在传入对应启动参数时打开，不传则关闭（包括头部）**。头部使用 1280×720，腕部各使用 640×480；均请求 30 fps / MJPEG，默认最多推流 10 fps、JPEG 质量 90，不放大小尺寸来源。采集由各相机后台线程进行，读取最新帧和编码均在机器人控制锁外；一路运行中断流不会中断其他画面和状态反馈。头显关闭固定注视点降采样并启用抗锯齿。此前树莓派头部单帧 JPEG 编码约 5.3 ms、单路 10 fps 约 14.5 Mbps 的结果不能代表三路总开销；CLI 的 `--video-hz` / `--max-frame-width` / `--jpeg-quality` 可调整推流开销。
 
-更新后重启网关并退出 VR、刷新页面；诊断栏应显示 `页面 home6`，相机状态应显示 `1280 × 720`。只同步磁盘文件不会更新已经打开的 Quest 页面。
+更新后重启网关并退出 VR、刷新页面；诊断栏应显示 `页面 cameras7`。桌面与头显都按名称显示已启用的相机，三路全开时头部在上方、左右腕在下方；仅开一路时放大居中。各路独立显示实时分辨率，超过 1.5 秒无新画面则隐藏旧图并显示“画面已过期”，恢复后自动显示。只同步磁盘文件不会更新已经打开的 Quest 页面。
 
 vr5 修复高清画面进入 VR 后黑屏：改变 canvas 分辨率前释放旧 GPU 纹理，使 Three.js 按新尺寸分配存储。此前只设置 `needsUpdate`，Quest 报 `GL_INVALID_VALUE: glCopySubTextureCHROMIUM: destination texture bad dimensions`，桌面图片仍正常。保留 720p 和原画面方向。用户已确认修复后 VR 内可见诊断测试图；真实相机画面仍需在运行网关后核对。左右摆腕移除额外的 yaw 取反，恢复 d569ef96 的转向映射，保留已确认可用的长轴 twist。
 
@@ -66,8 +66,32 @@ PY
 conda activate lerobot_alohamini
 adb reverse --remove-all
 adb reverse tcp:8000 tcp:8000
-python -m lerobot.vr_gateway.server --robot-model alohamini2pro --arm-ik-mode legacy --host 0.0.0.0 --port 8000
+python -m lerobot.vr_gateway.server --robot-model alohamini2pro --arm-ik-mode legacy \
+  --head-camera --left-wrist-camera --right-wrist-camera \
+  --host 0.0.0.0 --port 8000
 ```
+
+## 可选相机启动参数
+
+三个参数各自独立，可任意组合；启动时打开所选相机，进入 VR 后即可看到画面。刷新页面或退出再进入 VR 不会重复打开相机。
+
+| 参数 | 不指定设备值时使用 | 画面 |
+| --- | --- | --- |
+| `--head-camera [DEVICE]` | `/dev/am_camera_forward` | 头部 |
+| `--left-wrist-camera [DEVICE]` | `/dev/am_camera_wrist_left` | 左腕 |
+| `--right-wrist-camera [DEVICE]` | `/dev/am_camera_wrist_right` | 右腕 |
+
+参数省略时，该相机不打开、也不显示画面窗口。比如只开头部，在原启动命令后加 `--head-camera`；全部省略时仍可使用 VR 遥操，界面显示“相机未启用”。这与旧版本默认打开头部相机的行为不同。
+
+设备路径不同可直接传入，也支持 OpenCV 数字索引，例如：
+
+```bash
+python -m lerobot.vr_gateway.server --robot-model alohamini2pro --arm-ik-mode legacy \
+  --head-camera /dev/video0 --left-wrist-camera /dev/video2 --right-wrist-camera /dev/video4 \
+  --host 0.0.0.0 --port 8000
+```
+
+优先使用稳定的 `/dev/am_camera_*` 设备别名。传入参数的相机需已连接且支持上述 MJPEG 采集格式；打开失败时会报告启动错误，应核对设备路径和格式。未传参数的相机不需要接入。三路在真实树莓派和 Quest 上的帧率、USB 带宽与画面方向仍需实机核对。
 
 ## 首次使用：Folded Home 零位流程
 
@@ -127,10 +151,11 @@ adb reverse tcp:8000 tcp:8000
 python -m lerobot.vr_gateway.server \
   --robot-model alohamini2pro --arm-ik-mode legacy \
   --arm-mapping-dir ~/.config/lerobot/alohamini/arm_mapping \
+  --head-camera --left-wrist-camera --right-wrist-camera \
   --host 0.0.0.0 --port 8000 --diagnostics true
 ```
 
-首次检查新零位时可增加 `--max-joint-speed-deg-s 15`，从小范围前移、上移、左右和拧腕开始。页面应显示 `Legacy · Home 零位已加载`、`页面 home6`。松开 Grip 再握持会从实测姿态重新开始，不执行自动归位。若提示文件缺失或过期，先按上述流程修复文件，不退回无零位运行。
+首次检查新零位时可增加 `--max-joint-speed-deg-s 15`，从小范围前移、上移、左右和拧腕开始。页面应显示 `Legacy · Home 零位已加载`、`页面 cameras7`。松开 Grip 再握持会从实测姿态重新开始，不执行自动归位。若提示文件缺失或过期，先按上述流程修复文件，不退回无零位运行。
 
 完整采集选项见 [VR 双臂标定与零点确认](vr_calibration.md)。
 

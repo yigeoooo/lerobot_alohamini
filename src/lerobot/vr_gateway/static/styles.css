@@ -139,15 +139,54 @@ h3 {
   align-items: center;
   justify-content: center;
   flex: 1;
-  min-height: 280px;
+  min-height: 140px;
+  aspect-ratio: 4 / 3;
 }
 
-#view {
+.camera-view img {
   display: block;
   width: 100%;
   max-height: 480px;
   object-fit: contain;
   min-height: 100px;
+}
+
+.camera-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  padding: 0 16px;
+}
+
+.head-camera {
+  grid-column: 1 / -1;
+}
+
+.head-camera .camera-view {
+  aspect-ratio: 16 / 9;
+}
+
+.camera-heading {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  justify-content: space-between;
+  padding: 8px 0;
+  font-size: 12px;
+}
+
+.camera-heading span {
+  color: #bacbdd;
+}
+
+#camera-empty {
+  padding: 64px 24px;
+  text-align: center;
+  color: #bacbdd;
+}
+
+.camera-tile[hidden],.camera-view img[hidden] {
+  display: none;
 }
 
 .camera-footer {
@@ -516,7 +555,7 @@ body.vr-active a-scene {
     grid-template-columns: 1fr;
   }
   .camera-view {
-    min-height: 210px;
+    min-height: 100px;
   }
   .status-card {
     padding: 22px;

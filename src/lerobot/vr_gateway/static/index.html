@@ -4,9 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>AlohaMini · VR Teleoperation</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20260917-home6">
+  <link rel="stylesheet" href="/static/styles.css?v=20260917-cameras7">
   <script src="/static/vendor/aframe-1.7.1.min.js"></script>
-  <script src="/static/app.js?v=20260917-home6" defer></script>
+  <script src="/static/app.js?v=20260917-cameras7" defer></script>
 </head>
 <body>
 <div id="limit-warning" class="limit-warning" role="alert" hidden></div>
@@ -16,10 +16,24 @@
     <button id="settings" class="secondary">操作设置</button>
   </header>
   <div class="workspace">
-    <section class="camera-card" aria-label="前置相机">
-      <div class="card-heading"><h2>机器人视野</h2><span id="camera-state">等待画面</span></div>
-      <div class="camera-view"><img id="view" alt="前置相机实时画面"></div>
-      <div class="camera-footer"><span>FORWARD CAMERA</span><span>桌面与头显同步</span></div>
+    <section class="camera-card" aria-label="机器人相机">
+      <div class="card-heading"><h2>机器人视野</h2><span id="camera-state">等待相机配置</span></div>
+      <p id="camera-empty">等待网关相机配置</p>
+      <div class="camera-grid">
+        <article id="forward-tile" class="camera-tile head-camera" hidden>
+          <div class="camera-heading"><strong>头部</strong><span id="forward-state">等待画面</span></div>
+          <div class="camera-view"><img id="forward-view" alt="头部相机实时画面" hidden></div>
+        </article>
+        <article id="wrist_left-tile" class="camera-tile" hidden>
+          <div class="camera-heading"><strong>左腕</strong><span id="wrist_left-state">等待画面</span></div>
+          <div class="camera-view"><img id="wrist_left-view" alt="左腕相机实时画面" hidden></div>
+        </article>
+        <article id="wrist_right-tile" class="camera-tile" hidden>
+          <div class="camera-heading"><strong>右腕</strong><span id="wrist_right-state">等待画面</span></div>
+          <div class="camera-view"><img id="wrist_right-view" alt="右腕相机实时画面" hidden></div>
+        </article>
+      </div>
+      <div class="camera-footer"><span>LIVE CAMERAS</span><span>桌面与头显同步</span></div>
     </section>
     <section class="status-card">
       <div class="card-heading"><h2>连接与跟随</h2><span id="vr-state">VR 未进入</span></div>
@@ -63,13 +77,17 @@
     <button type="submit" class="primary wide">应用并重建锚点</button>
   </form>
 </dialog>
-<canvas id="video-texture" width="640" height="480" hidden></canvas>
+<canvas id="forward-texture" width="1280" height="720" hidden></canvas>
+<canvas id="wrist_left-texture" width="640" height="480" hidden></canvas>
+<canvas id="wrist_right-texture" width="640" height="480" hidden></canvas>
 <canvas id="hud-texture" width="1024" height="180" hidden></canvas>
 <canvas id="limit-texture" width="1024" height="150" hidden></canvas>
 <!-- All dependencies and controller geometry are local; no CDN or remote fonts. -->
 <a-scene embedded teleop-input vr-mode-ui="enabled: false" loading-screen="enabled: false" renderer="colorManagement: true; antialias: true; foveationLevel: 0" webxr="referenceSpaceType: local-floor" background="color: #101827">
   <a-entity camera look-controls="enabled: false" position="0 0 0">
-    <a-plane id="video-plane" position="0 0 -1.5" rotation="0 0 0" width="1.6" height="1.2" material="shader: flat; src: #video-texture; side: double"></a-plane>
+    <a-plane id="forward-plane" visible="false" position="0 0 -1.5" width="1.6" height="0.9" material="shader: flat; src: #forward-texture; side: double"></a-plane>
+    <a-plane id="wrist_left-plane" visible="false" position="0 0 -1.5" width="0.76" height="0.57" material="shader: flat; src: #wrist_left-texture; side: double"></a-plane>
+    <a-plane id="wrist_right-plane" visible="false" position="0 0 -1.5" width="0.76" height="0.57" material="shader: flat; src: #wrist_right-texture; side: double"></a-plane>
     <a-plane id="hud-plane" position="0 -0.68 -1.5" width="1.6" height="0.28125" material="shader: flat; src: #hud-texture; transparent: true"></a-plane>
     <a-plane id="limit-plane" visible="false" position="0 0.46 -1.49" width="1.55" height="0.227" material="shader: flat; src: #limit-texture; transparent: true"></a-plane>
   </a-entity>

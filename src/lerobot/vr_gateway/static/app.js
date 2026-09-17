@@ -10,13 +10,14 @@
   const LIFT_JOG_VELOCITY = 1300;
   const $ = (id) => document.getElementById(id);
   const status = $('status');
-  const image = $('view');
   const scene = document.querySelector('a-scene');
+  const cameras = Object.entries({ forward: '头部', wrist_left: '左腕', wrist_right: '右腕' })
+    .map(([name, label]) => ({ name, label, image: $(`${name}-view`), enabled: false,
+      at: null, live: false, loading: false, pending: null, message: '等待画面' }));
   const inputHistory = [];
   let ws;
   let health = null;
   let healthAt = 0;
-  let cameraAt = 0;
   let videoRotation = 0;
   let limitWarning = '';
   let xrSession = null;
@@ -51,6 +52,11 @@
 
   function showDisconnected(text) {
     health = null;
+    for (const camera of cameras) {
+      camera.pending = null;
+      camera.at = null;
+      setCameraState(camera, '连接已断开');
+    }
     showLimitWarnings([]);
     status.textContent = text;
     for (const side of ['left', 'right']) {
@@ -118,7 +124,7 @@
       : (message.arm_mapping_loaded ? '机械标定已加载' : '机械标定不可用');
     $('feedback-state').textContent = message.feedback_fresh ? `反馈 ${Math.round(message.feedback_age_ms)} ms` : '反馈过期';
     $('diagnostics').textContent = `IK ${message.ik_available ? '可用' : '不可用'} · 已发送 ${message.actions_sent} · ` +
-      `拒绝 ${message.ik_rejected} · 过期 ${message.poses_stale} · 总线 ${message.action_ms} ms · 控制 ${message.control_hz_actual ?? '—'} Hz · 页面 home6`;
+      `拒绝 ${message.ik_rejected} · 过期 ${message.poses_stale} · 总线 ${message.action_ms} ms · 控制 ${message.control_hz_actual ?? '—'} Hz · 页面 cameras7`;
     $('tcp-info').textContent = `TCP: ${Object.values(message.tcp_frames || {}).join(' / ') || '未知'}`;
     drawHUD();
   }
@@ -129,7 +135,7 @@
       lastBaseSent = null;
       for (const hand of Object.values(hands)) { hand.epoch++; hand.trigger = null; hand.triggerArmed = false; }
       status.textContent = '网关已连接，等待机器人状态';
-      send({ type: 'hello', client: 'webxr', protocol: 3 });
+      send({ type: 'hello', client: 'webxr', protocol: 4 });
     };
     ws.onclose = (event) => {
       showDisconnected(event.code === 1008 ? '已有其他操作员连接' : '网关连接已断开');
@@ -139,7 +145,11 @@
     ws.onmessage = (event) => {
       let message;
       try { message = JSON.parse(event.data); } catch (_) { return; }
-      if (message.jpeg_b64) image.src = 'data:image/jpeg;base64,' + message.jpeg_b64;
+      if (Array.isArray(message.cameras)) configureCameras(message.cameras);
+      for (const camera of cameras) {
+        const frame = message.frames?.[camera.name];
+        if (camera.enabled && frame?.jpeg_b64) queueCameraFrame(camera, frame.jpeg_b64);
+      }
       if (message.type === 'status') reportStatus(message);
       if (message.type === 'error') { status.textContent = message.error; logInput(message.error); }
       if (message.type === 'ack' && (message.ignored || ['rejected', 'stale', 'ik_unavailable', 'unbound'].includes(message.status))) {
@@ -220,7 +230,7 @@
   $('settings-form').onsubmit = (event) => {
     event.preventDefault();
     videoRotation = Number($('video-rotation').value) === 180 ? 180 : 0;
-    drawVideo();
+    cameras.forEach(drawVideo);
     if (send({ type: 'arm_settings', position_scale: Number($('position-scale').value),
       max_joint_speed_deg_s: Number($('joint-speed').value) })) $('settings-dialog').close();
   };
@@ -352,17 +362,97 @@
     const map = $(id).getObject3D('mesh')?.material?.map;
     if (map) map.needsUpdate = true;
   }
-  function drawVideo() {
-    if (!image.naturalWidth || !image.naturalHeight) return;
-    const canvas = $('video-texture');
+  function configureCameras(names) {
+    for (const camera of cameras) {
+      const enabled = names.includes(camera.name);
+      if (camera.enabled !== enabled) {
+        camera.enabled = enabled;
+        camera.pending = null;
+        camera.at = null;
+        setCameraState(camera, '等待画面');
+      }
+      $(`${camera.name}-tile`).hidden = !enabled;
+      $(`${camera.name}-plane`).setAttribute('visible', enabled);
+    }
+    const count = cameras.filter((camera) => camera.enabled).length;
+    for (const camera of cameras) {
+      $(`${camera.name}-tile`).style.gridColumn = count === 1 || camera.name === 'forward' ? '1 / -1' : '';
+    }
+    $('camera-state').textContent = count ? `已启用 ${count} 路相机` : '相机未启用';
+    $('camera-empty').hidden = count > 0;
+    $('camera-empty').textContent = '未启用相机';
+    layoutCameras();
+    drawHUD();
+  }
+
+  function layoutCameras() {
+    const enabled = cameras.filter((camera) => camera.enabled);
+    const head = enabled.find((camera) => camera.name === 'forward');
+    const wrists = enabled.filter((camera) => camera !== head);
+    const height = (camera, width) => {
+      const canvas = $(`${camera.name}-texture`);
+      return width * canvas.height / canvas.width;
+    };
+    const place = (camera, x, y, width) => {
+      const plane = $(`${camera.name}-plane`);
+      plane.setAttribute('width', width);
+      plane.setAttribute('height', height(camera, width));
+      plane.setAttribute('position', `${x} ${y} -1.5`);
+    };
+    let top = 0.45;
+    let bottom = -0.45;
+    if (enabled.length === 1) {
+      const camera = enabled[0];
+      top = height(camera, 1.6) / 2;
+      bottom = -top;
+      place(camera, 0, 0, 1.6);
+    } else if (enabled.length > 1) {
+      top = head ? 0.85 : Math.max(...wrists.map((camera) => height(camera, 0.76))) / 2;
+      bottom = top;
+      if (head) {
+        bottom -= height(head, 1.6);
+        place(head, 0, (top + bottom) / 2, 1.6);
+        bottom -= 0.08;
+      }
+      const wristTop = bottom;
+      for (const camera of wrists) {
+        const h = height(camera, 0.76);
+        const x = wrists.length === 1 ? 0 : camera.name === 'wrist_left' ? -0.42 : 0.42;
+        place(camera, x, wristTop - h / 2, 0.76);
+        bottom = Math.min(bottom, wristTop - h);
+      }
+    }
+    $('hud-plane').setAttribute('position', `0 ${bottom - 0.18} -1.5`);
+    $('limit-plane').setAttribute('position', `0 ${top + 0.15} -1.49`);
+  }
+
+  function setCameraState(camera, message, live = false) {
+    camera.live = live;
+    camera.message = message;
+    camera.image.hidden = !live;
+    $(`${camera.name}-state`).textContent = message;
+    drawVideo(camera);
+  }
+
+  function queueCameraFrame(camera, jpeg) {
+    // Decode at most one image per camera; retain only the newest pending frame.
+    if (camera.loading) { camera.pending = jpeg; return; }
+    camera.loading = true;
+    camera.image.src = 'data:image/jpeg;base64,' + jpeg;
+  }
+
+  function drawVideo(camera) {
+    const { image, name } = camera;
+    const canvas = $(`${name}-texture`);
     // Rotate pixels in one place. The plane itself stays upright, avoiding
     // accumulated canvas/mesh rotations; the desktop source image is unchanged.
-    if (canvas.width !== image.naturalWidth || canvas.height !== image.naturalHeight) {
+    if (camera.live && image.naturalWidth && image.naturalHeight &&
+      (canvas.width !== image.naturalWidth || canvas.height !== image.naturalHeight)) {
       // Three.js allocates GPU storage for the texture's original dimensions.
       // needsUpdate alone does not resize that storage. Quest then rejects the
       // canvas upload (glCopySubTextureCHROMIUM: destination bad dimensions).
       // Release it before resizing so the next render allocates the new size.
-      $('video-plane').getObject3D('mesh')?.material?.map?.dispose();
+      $(`${name}-plane`).getObject3D('mesh')?.material?.map?.dispose();
       canvas.width = image.naturalWidth;
       canvas.height = image.naturalHeight;
     }
@@ -370,23 +460,43 @@
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    if (videoRotation === 180) {
-      ctx.translate(canvas.width, canvas.height);
-      ctx.rotate(Math.PI);
+    if (camera.live) {
+      if (videoRotation === 180) {
+        ctx.translate(canvas.width, canvas.height);
+        ctx.rotate(Math.PI);
+      }
+      ctx.drawImage(image, 0, 0);
+    } else {
+      ctx.fillStyle = '#14223b';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
     }
-    ctx.drawImage(image, 0, 0);
     ctx.restore();
-    const height = 1.6 * canvas.height / canvas.width;
-    $('video-plane').setAttribute('height', height);
-    $('hud-plane').setAttribute('position', `0 ${-height / 2 - 0.17} -1.5`);
-    $('limit-plane').setAttribute('position', `0 ${height / 2 - 0.14} -1.49`);
-    dirtyTexture('video-plane');
+    const fontSize = Math.max(20, Math.round(canvas.width / 32));
+    ctx.fillStyle = '#101827d9';
+    ctx.fillRect(0, 0, canvas.width, fontSize * 1.8);
+    ctx.fillStyle = camera.live ? '#e4edf7' : '#fbbf24';
+    ctx.font = `${fontSize}px sans-serif`;
+    ctx.fillText(`${camera.label} · ${camera.message}`, 12, fontSize * 1.25, canvas.width - 24);
+    layoutCameras();
+    dirtyTexture(`${name}-plane`);
   }
-  image.onload = () => {
-    cameraAt = performance.now();
-    $('camera-state').textContent = `实时画面 ${image.naturalWidth} × ${image.naturalHeight}`;
-    drawVideo();
-  };
+  for (const camera of cameras) {
+    const finish = (ok) => {
+      camera.loading = false;
+      if (camera.enabled && ws?.readyState === WebSocket.OPEN) {
+        camera.at = ok ? performance.now() : null;
+        setCameraState(camera, ok
+          ? `实时 ${camera.image.naturalWidth} × ${camera.image.naturalHeight}` : '画面解码失败', ok);
+        if (camera.pending) {
+          const jpeg = camera.pending;
+          camera.pending = null;
+          queueCameraFrame(camera, jpeg);
+        }
+      }
+    };
+    camera.image.onload = () => finish(true);
+    camera.image.onerror = () => finish(false);
+  }
   function drawHUD() {
     const canvas = $('hud-texture');
     const ctx = canvas.getContext('2d');
@@ -395,7 +505,8 @@
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.fillStyle = health?.estop ? '#ff8c97' : '#e4edf7';
     ctx.font = '28px sans-serif';
-    ctx.fillText(status.textContent, 24, 45);
+    const count = cameras.filter((camera) => camera.enabled).length;
+    ctx.fillText(`${status.textContent} · ${count ? `${count} 路相机` : '相机未启用'}`, 24, 45, 976);
     ctx.font = '24px sans-serif';
     ctx.fillText(`左臂 ${$('left-state').textContent}    右臂 ${$('right-state').textContent}    ${$('feedback-state').textContent}`, 24, 90);
     ctx.fillStyle = '#a9bdd4';
@@ -452,7 +563,11 @@
   };
   setInterval(() => {
     if (health && performance.now() - healthAt > 2500) showDisconnected('网关状态已过期');
-    if (cameraAt && performance.now() - cameraAt > 1500) $('camera-state').textContent = '画面已过期';
+    for (const camera of cameras) {
+      if (camera.enabled && camera.live && camera.at !== null && performance.now() - camera.at > 1500) {
+        setCameraState(camera, '画面已过期');
+      }
+    }
   }, 500);
   drawHUD();
   connect();
