@@ -114,11 +114,11 @@
         (arm?.reason ? ` · ${reason[arm.reason] || arm.reason}` : '');
     }
     $('mapping-state').textContent = message.arm_ik_mode === 'legacy'
-      ? '旧版平移 · 独立拧腕 · 无需 Home 校准'
+      ? (message.arm_mapping_loaded ? 'Legacy · Home 零位已加载' : 'Legacy · 缺少 Home 零位')
       : (message.arm_mapping_loaded ? '机械标定已加载' : '机械标定不可用');
     $('feedback-state').textContent = message.feedback_fresh ? `反馈 ${Math.round(message.feedback_age_ms)} ms` : '反馈过期';
     $('diagnostics').textContent = `IK ${message.ik_available ? '可用' : '不可用'} · 已发送 ${message.actions_sent} · ` +
-      `拒绝 ${message.ik_rejected} · 过期 ${message.poses_stale} · 总线 ${message.action_ms} ms · 控制 ${message.control_hz_actual ?? '—'} Hz · 页面 vr5`;
+      `拒绝 ${message.ik_rejected} · 过期 ${message.poses_stale} · 总线 ${message.action_ms} ms · 控制 ${message.control_hz_actual ?? '—'} Hz · 页面 home6`;
     $('tcp-info').textContent = `TCP: ${Object.values(message.tcp_frames || {}).join(' / ') || '未知'}`;
     drawHUD();
   }

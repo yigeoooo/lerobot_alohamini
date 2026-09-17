@@ -1,4 +1,4 @@
-"""Legacy arm translation with wrist gestures, without a Folded Home capture."""
+"""Legacy hand gestures on the original CAD model, bound to captured Folded Home."""
 
 from __future__ import annotations
 
@@ -7,11 +7,14 @@ from pathlib import Path
 
 import numpy as np
 
-from .arm_ik import ARM_JOINTS, AlohaMiniDualArmIK, pose_to_matrix, rotation_exp, rotation_log
+from .arm_ik import AlohaMiniDualArmIK, pose_to_matrix, rotation_exp, rotation_log
+from .calibration.profile import ArmMapping
 
 
 class LegacyArmIK(AlohaMiniDualArmIK):
-    """Old CAD translation and timing, with independent hand-axis wrist roll."""
+    """CAD hand gestures and legacy timing, with hand-axis wrist roll."""
+
+    mode = "legacy"
 
     def __init__(self, *args, **options):
         super().__init__(*args, **options)
@@ -101,27 +104,19 @@ class LegacyArmIK(AlohaMiniDualArmIK):
         return float(np.clip(now - previous, self.min_dt, self.max_dt))
 
 
-def make_legacy_ik(calibration: dict, *, joint_signs: dict[str, float], **options) -> LegacyArmIK:
+def make_legacy_ik(mapping: ArmMapping, **options) -> LegacyArmIK:
     options.setdefault("position_scale", 0.5)
     options.setdefault("posture_weight", 5e-4)
     options.setdefault("retry_budget_s", 0.0)
-    ik = LegacyArmIK(
+    # With the physical zero restored, CAD -Y is forward. The old XR-Z
+    # reflection compensated for the incorrect zero and now reverses reach.
+    options.setdefault("translation_direction", np.eye(3))
+    # Home binds encoder positions to this CAD chain's joint angles. The shared
+    # IK installs its asymmetric per-side limits in Placo and output protection;
+    # intersecting with midpoint-centred motor degrees would exclude straight arms.
+    return LegacyArmIK(
         Path(__file__).parent / "assets/alohamini2pro/urdf/alohamini2pro.urdf",
-        joint_signs=joint_signs,
+        arm_mapping=mapping,
         home_before_engage=False,
         **options,
     )
-    # Keep the installed motor ranges. This needs no mechanical Home reference:
-    # legacy degrees are centred on each motor's existing calibrated range.
-    # Apply them inside Placo too, so an unreachable solve cannot ask the driver
-    # to move a shoulder or elbow beyond its calibrated travel.
-    for side in ("left", "right"):
-        for index, joint in enumerate(ARM_JOINTS):
-            motor = calibration[f"arm_{side}_{joint}"]
-            half_range_deg = (motor["range_max"] - motor["range_min"]) * 180.0 / 4095.0
-            if not np.isfinite(half_range_deg) or half_range_deg <= 0.0:
-                raise ValueError(f"Invalid existing motor range for arm_{side}_{joint}")
-            limits = ik.joint_limits_deg[side][index]
-            limits[:] = [max(limits[0], -half_range_deg), min(limits[1], half_range_deg)]
-            ik.robot.set_joint_limits(ik.joints[side][index], *np.deg2rad(limits))
-    return ik

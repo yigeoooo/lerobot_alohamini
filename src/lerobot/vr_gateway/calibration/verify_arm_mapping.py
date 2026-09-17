@@ -26,8 +26,17 @@ def check_round_trip(mapping: ArmMapping) -> None:
 def arm_points(ik, side: str, joints_deg) -> np.ndarray:
     ik._write_joints(side, np.asarray(joints_deg))
     ik.robot.update_kinematics()
-    frames = ("Base", "Upper_Arm", "Lower_Arm", "Wrist_Pitch_Roll", "Fixed_Jaw", "tcp")
-    return np.array([ik.robot.get_T_world_frame(f"{side}_{frame}")[:3, 3] for frame in frames])
+    frames = [
+        f"{side}_{frame}" for frame in ("Base", "Upper_Arm", "Lower_Arm", "Wrist_Pitch_Roll", "Fixed_Jaw")
+    ]
+    frames.append(ik.tip_frames[side])
+    points = np.array([ik.robot.get_T_world_frame(frame)[:3, 3] for frame in frames])
+    if getattr(ik, "mode", None) == "legacy":
+        # Display the original CAD chain in the same physical forward/left/up
+        # axes as the reference guide. This does not alter the legacy controller.
+        cad_to_base = np.array([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+        points = points @ cad_to_base.T
+    return points
 
 
 def write_figure(home: dict, measured: dict | None, destination: Path) -> None:
@@ -64,6 +73,7 @@ def write_figure(home: dict, measured: dict | None, destination: Path) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--arm-mapping-dir", type=Path, default=DEFAULT_MAPPING_DIR)
+    parser.add_argument("--arm-ik-mode", choices=["legacy", "calibrated"], default="legacy")
     parser.add_argument("--calibration-json", type=Path)
     parser.add_argument("--show-home", action="store_true", help="render packaged CAD Home before capture")
     parser.add_argument("--read-hardware", action="store_true", help="read only the two arm serial buses")
@@ -83,7 +93,8 @@ def main() -> None:
         parser.error("--expect-home requires --read-hardware")
 
     from lerobot.vr_gateway.arm_ik import AlohaMiniDualArmIK
-    from lerobot.vr_gateway.calibrated_ik import make_calibrated_ik
+    from lerobot.vr_gateway.legacy_ik import LegacyArmIK
+    from lerobot.vr_gateway.server import make_vr_arm_ik
 
     if args.show_home:
         import yaml
@@ -92,11 +103,14 @@ def main() -> None:
             side: yaml.safe_load((ASSET_DIR / f"calibration/hardware_joint_map_{side}.yaml").read_text())
             for side in ("left", "right")
         }
-        ik = AlohaMiniDualArmIK(
-            ASSET_DIR / "urdf/alohamini2pro_kinematic.urdf",
-            tip_frame_template="{side}_tcp",
-            home_before_engage=False,
-        )
+        if args.arm_ik_mode == "legacy":
+            ik = LegacyArmIK(ASSET_DIR / "urdf/alohamini2pro.urdf", home_before_engage=False)
+        else:
+            ik = AlohaMiniDualArmIK(
+                ASSET_DIR / "urdf/alohamini2pro_kinematic.urdf",
+                tip_frame_template="{side}_tcp",
+                home_before_engage=False,
+            )
     else:
         cal_path = args.calibration_json or args.arm_mapping_dir / "AlohaMiniRobot.json"
         if args.read_hardware and args.calibration_json is None:
@@ -107,7 +121,7 @@ def main() -> None:
         mapping = ArmMapping.load(args.arm_mapping_dir, calibration)
         check_round_trip(mapping)
         mappings = mapping.mappings
-        ik = make_calibrated_ik(mapping)
+        ik = make_vr_arm_ik(calibration, mode=args.arm_ik_mode, mapping_dir=args.arm_mapping_dir)
 
     ik._sync_lift_joint({"lift_axis.height_mm": args.lift_height_mm})
     home_q = {
@@ -118,6 +132,8 @@ def main() -> None:
     measured = None
     report = {
         "source": "CAD reference preview" if args.show_home else "mapping numerical checks",
+        "arm_ik_mode": args.arm_ik_mode,
+        "tcp_frames": ik.tip_frames,
         "lift_height_mm_for_display": args.lift_height_mm,
         "collision_checked": False,
         "physical_geometry_confirmed": False,

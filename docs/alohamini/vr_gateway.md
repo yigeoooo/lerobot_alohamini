@@ -2,21 +2,23 @@
 
 本文面向操作员和部署人员，记录 `vr_gateway` 的上线检查、VR 摇操流程、问题关闭模板和真实启动命令。
 
-2026-09-16 根据实机反馈，默认模式（`--arm-ik-mode legacy`）保留 `d569ef96` 的 CAD 模型、平移映射与前后补偿、0.5 位移倍率和 `Goal_Velocity=2000`。在此基础上修正左右转向，并将手柄长轴 twist 映射到夹爪滚转；用户已确认本次腕关节问题解决，本轮继续保留该实现。它仍经六轴 IK，并不是完全隔离的单关节通道，也不是该 Git 提交的完整原样回退。直接沿用机器已有的电机行程标定，无需重新做零点或 Folded Home 校准；从当前位置握住 Grip 建立锚点，不自动回 Home。
+2026-09-17 起，默认 `--arm-ik-mode legacy` 使用 **本机 Folded Home 零位映射**。启动前先完成下文的一次性参考姿态采集与核对；缺少映射或文件与当前电机标定不符时，网关在连接硬件前报错退出。已有且确认正确的本机 Home 文件可复用。仍使用原 CAD 模型、Moving_Jaw 末端、0.5 位移倍率、Goal_Velocity=2000 和原长轴拧腕手势；从当前位置握住 Grip 建立锚点，不自动回 Home。
+
+Home 将电机行程中点角度转换成真实 CAD 参考角度，左右臂的上下限也一起转换。原先为了错误零位增加的前后反向补偿已去掉，前移手柄对应 CAD −Y（机身前方）。本次没有把水平转手柄改成肩部一对一角度控制；位置/姿态和肩肘偏好权重也保持 legacy 默认值。离线效果与剩余限制见 [Home 接入验证](vr_legacy_home.md)。
 
 开始一轮操控时自动按当前头部朝向对齐：任一手或双手首次 Grip 都可触发；只要还有一侧正在控制，中途加入或重新握持的另一侧就沿用同一个方向基准，仅建立自身的位置/姿态锚点。两侧均松开后，下次握持重新对齐。跟随期间转头不改变映射，Y 仍可手动重新对齐。缺少有效头部追踪时不会开始自动对齐的跟随。
 
 桌面和 VR 画面内会弹出“限位警告”，列出对应侧和关节。依据现有电机行程与模型范围，实测角度或已接受目标距边界不超过 0.5° 时提示；离开范围边缘后消失。速度限幅或单纯 IK 残差不会冒充关节限位。反馈过期时不继续显示旧限位状态。
 
-旧版夹爪也无需 Home 映射：沿用现有电机的 RANGE_0_100 行程，两侧均为增大值打开、减小值闭合。夹爪默认闭合，按住 Trigger 打开，按得越深打开越大，松开闭合，无需同时按 Grip。进入 VR 后有有效手柄追踪和健康反馈时即发送当前扳机目标；追踪丢失、暂停、急停或反馈失效时停止发送。电机夹持电流保护继续生效。
+legacy 的夹爪端点仍使用电机行程：沿用现有电机的 RANGE_0_100 行程，两侧均为增大值打开、减小值闭合。夹爪默认闭合，按住 Trigger 打开，按得越深打开越大，松开闭合，无需同时按 Grip。进入 VR 后有有效手柄追踪和健康反馈时即发送当前扳机目标；追踪丢失、暂停、急停或反馈失效时停止发送。电机夹持电流保护继续生效。
 
 VR 相机改为 1280×720 / 30 fps / MJPEG，推流保留 1280 像素宽、JPEG 质量 90、10 fps；不放大小尺寸来源。头显关闭固定注视点降采样并启用抗锯齿。树莓派实测单帧 JPEG 编码约 5.3 ms（中位数），当前实景样本含 base64 的 10 fps 数据量约 14.5 Mbps，具体随画面变化。编码保持在机器人控制锁外，CLI 的 `--max-frame-width` / `--jpeg-quality` 仍可覆盖。
 
-更新后重启网关并退出 VR、刷新页面；诊断栏应显示 `页面 vr5`，相机状态应显示 `1280 × 720`。只同步磁盘文件不会更新已经打开的 Quest 页面。
+更新后重启网关并退出 VR、刷新页面；诊断栏应显示 `页面 home6`，相机状态应显示 `1280 × 720`。只同步磁盘文件不会更新已经打开的 Quest 页面。
 
 vr5 修复高清画面进入 VR 后黑屏：改变 canvas 分辨率前释放旧 GPU 纹理，使 Three.js 按新尺寸分配存储。此前只设置 `needsUpdate`，Quest 报 `GL_INVALID_VALUE: glCopySubTextureCHROMIUM: destination texture bad dimensions`，桌面图片仍正常。保留 720p 和原画面方向。用户已确认修复后 VR 内可见诊断测试图；真实相机画面仍需在运行网关后核对。左右摆腕移除额外的 yaw 取反，恢复 d569ef96 的转向映射，保留已确认可用的长轴 twist。
 
-原 Home 方案保留为显式选项 `--arm-ik-mode calibrated`，才需要[本机机械参考映射](vr_calibration.md)，并继续使用该模式的 1.0 倍率、`Goal_Velocity=100`、5° 驱动领先、25 mm / 15° TCP 领先限制。该映射仍待物理几何核验，不能把 Home 已采集当作方向已验收。不要把先前试验的 `--arm-goal-velocity 100` 或 `--position-scale 1` 混入旧版恢复命令。
+机械参考采集流程与另一套模式共用，但本页运行命令统一使用 `legacy`。加载 Home 不会切换到另一套模式，也不会改用其速度、TCP 或求解权重。
 
 2026-09-16 重构：页面采用 Telegrip 风格，左右 Grip 独立跟随、Trigger 独立控制夹爪。底盘、升降和 WASD 映射保持原样。网关启动时连接机器人一次；打开或刷新页面只连接 `/ws`，不会再次调用机器人 `connect()` 或升降初始化。只允许一个控制客户端。
 
@@ -33,7 +35,7 @@ VR 网关在 `lerobot_alohamini` 环境中运行，不以 `uv` 作为主流程�
 
 ```bash
 conda activate lerobot_alohamini
-python -m pip install fastapi "uvicorn[standard]" websockets wsproto
+python -m pip install fastapi "uvicorn[standard]" websockets wsproto pyyaml matplotlib
 python -m pip install "lerobot[placo-dep]"
 ```
 
@@ -58,7 +60,7 @@ PY
 
 如果 `placo` 在树莓派上因为底层 `cmeel` 轮子缺库而失败，先不要改协议，先把缺的二进制依赖补齐，再重试导入检查。
 
-真实启动命令：
+完成下文 Home 流程后的日常启动命令（使用默认映射目录）：
 
 ```bash
 conda activate lerobot_alohamini
@@ -66,6 +68,71 @@ adb reverse --remove-all
 adb reverse tcp:8000 tcp:8000
 python -m lerobot.vr_gateway.server --robot-model alohamini2pro --arm-ik-mode legacy --host 0.0.0.0 --port 8000
 ```
+
+## 首次使用：Folded Home 零位流程
+
+这一步补充软件零位，保留现有电机行程，不写 EEPROM。机械安装、编码器零偏或标定范围发生变化后需要重新核对/采集；日常启动复用文件，不要求每次摆回 Home。头显 Y 对齐和 Grip 锚点不能替代机械参考。
+
+### 1. 生成姿态参考图
+
+在树莓派已有环境内执行：
+
+```bash
+cd ~/lerobot_alohamini
+conda activate lerobot_alohamini
+python -m lerobot.vr_gateway.calibration.verify_arm_mapping \
+  --arm-ik-mode legacy --show-home --output-dir /tmp/alohamini_home
+```
+
+查看 `/tmp/alohamini_home/arm_reference.svg`（同时生成 PNG）。图中使用机身前/左/上的方向展示 legacy 的原 CAD 链和 Moving_Jaw 末端。扭矩关闭、停止网关/Host 等串口占用程序后，手动将双臂摆到图中姿态，并闭合夹爪。按上臂、前臂和腕部的方向确认，不要把任意折叠收纳姿态当作 Home。参考角度并非全部为零：左腕俯仰约 82.27°、右腕俯仰约 85.94°。
+
+### 2. 只读采集或复用本机 Home
+
+如果已有同一台机器、同一电机标定下采集且几何已确认的 Home，可以直接进入第 3 步。
+
+首次采集：
+
+```bash
+python -m lerobot.vr_gateway.calibration.sync_arm_mapping
+```
+
+按提示输入 `CAPTURE FOLDED HOME`。脚本对照当前 JSON 和 EEPROM，读取 10 组稳定编码器值；不发送运动、不改变扭矩、不写电机零偏。默认输出：
+
+```text
+~/.config/lerobot/alohamini/arm_mapping/
+  AlohaMiniRobot.json
+  hardware_joint_map_left.yaml
+  hardware_joint_map_right.yaml
+```
+
+目录存在时脚本拒绝覆盖。需要重采可指定新目录，例如 `--output-dir ~/.config/lerobot/alohamini/arm_mapping_legacy_v2`，并在后续核对和网关命令中使用相同的 `--arm-mapping-dir`。不要把仓库的历史参考 tick 或测试夹具复制成当前机器的正式 Home。
+
+### 3. 核对姿态和转换
+
+保持所采集的 Home，执行：
+
+```bash
+python -m lerobot.vr_gateway.calibration.verify_arm_mapping \
+  --arm-ik-mode legacy --read-hardware --expect-home \
+  --output-dir /tmp/alohamini_home_check
+```
+
+检查 `report.json` 与 `arm_reference.svg`：全行程双向转换应通过，实测关节与 Home 参考相差不超过 2°。随后可在扭矩关闭时手动小幅改变单关节，去掉 `--expect-home` 再核对实际方向与图形。**转换通过仅证明数值一致，不能证明摆放姿态正确。** 之前文件若仍标记 `home_captured_requires_physical_geometry_check`，需要完成这一步实物对照。
+
+### 4. 启动 legacy
+
+```bash
+adb reverse --remove-all
+adb reverse tcp:8000 tcp:8000
+python -m lerobot.vr_gateway.server \
+  --robot-model alohamini2pro --arm-ik-mode legacy \
+  --arm-mapping-dir ~/.config/lerobot/alohamini/arm_mapping \
+  --host 0.0.0.0 --port 8000 --diagnostics true
+```
+
+首次检查新零位时可增加 `--max-joint-speed-deg-s 15`，从小范围前移、上移、左右和拧腕开始。页面应显示 `Legacy · Home 零位已加载`、`页面 home6`。松开 Grip 再握持会从实测姿态重新开始，不执行自动归位。若提示文件缺失或过期，先按上述流程修复文件，不退回无零位运行。
+
+完整采集选项见 [VR 双臂标定与零点确认](vr_calibration.md)。
 
 ## 上线前检查表
 
@@ -91,6 +158,7 @@ src/lerobot/vr_gateway/assets/alohamini2pro/urdf/alohamini2pro.urdf
 - [ ] **Torque 生命周期**。完成条件：`connect -> configure -> enable_torque` 明确且可重复。验证方法：记录连接、模式、扭矩寄存器和断线状态。验证记录：____
 - [ ] **唯一客户端**。完成条件：同一时间只有一个控制客户端。验证方法：双浏览器并发和租约检查。验证记录：____
 - [x] **底层 motor calibration 文件存在**。完成条件：`/home/pi5/.cache/huggingface/lerobot/calibration/robots/alohamini/AlohaMiniRobot.json` 存在，字段包含 `id/drive_mode/homing_offset/range_min/range_max`，并被 `AlohaMini.connect()/calibrate()` 使用。验证方法：只读核对文件和代码链路。验证记录：____
+- [ ] **Home 零位与几何核对**。完成条件：本机 Home 文件与当前标定匹配，并完成上臂、前臂和腕部的实物方向对照。验证记录：____
 - [~] **VR 中位/重锚定**。完成条件：操作者摆好手柄后，通过显式确认捕获当前 controller pose 与当前 TCP/关节状态，作为本次会话的 `_ctrl0/_robot0`。验证方法：首帧不跳变，`Re-anchor / Align` 后继续跟随。验证记录：2026-09-07，按钮和协议已补，待 Quest+树莓派实机确认。
 
 ## 运行拓扑
@@ -106,7 +174,7 @@ src/lerobot/vr_gateway/assets/alohamini2pro/urdf/alohamini2pro.urdf
 2. 激活 `conda` 环境。
 3. 清理旧的 ADB reverse。
 4. 重新建立 `tcp:8000 -> tcp:8000`。
-5. 启动网关。
+5. 确认已完成一次性 Home 流程，再启动 legacy 网关。
 6. 检查 `/health`。
 7. 在 Quest 浏览器打开 `http://localhost:8000/`。
 8. 先确认画面、状态栏、手柄追踪和 observation。
@@ -142,9 +210,9 @@ src/lerobot/vr_gateway/assets/alohamini2pro/urdf/alohamini2pro.urdf
 
 页面分开显示网关连接、左右串口连接、力矩寄存器读回、机械标定可用性、反馈年龄及每侧跟随/保持。无法读回力矩时显示“未知”，连接成功不等于力矩使能。前置相机保留桌面原方向和原始比例；本次移除 VR 平面原有的 180° 旋转，相当于将用户反馈的倒置画面再转 180°。“操作设置 → VR 画面方向”还可选择正常/旋转 180°，只在纹理绘制时处理一次。A-Frame 1.7.1 和手柄几何在本地部署，普通 immersive VR 为当前入口，未宣称支持已验收的透视模式。
 
-原始 WebXR 位姿在后端统一转换：无额外朝向偏转时 `(x_base, y_base, z_base) = (-z_xr, -x_xr, y_xr)`。世界相对旋转为 `R_target = A (R_C R_C0ᵀ) Aᵀ R_E0`；因此手柄局部轴不再隐式等同于 TCP 局部轴。TCP 使用固定夹爪上的 `left_tcp/right_tcp`，升降高度仅用于 FK。
+原始 WebXR 位姿在后端统一转换。legacy 在未叠加头部朝向时使用 CAD 基准 `(x_cad, y_cad, z_cad) = (-x_xr, z_xr, y_xr)`；CAD −Y 是机身前方，−X 是机身右方。末端使用 `left_Moving_Jaw/right_Moving_Jaw`，旋转继续使用 swing/twist 分解，升降高度仅用于 FK。
 
-默认旧版模式保留 Placo、原位置/姿态权重、`posture_weight=5e-4` 和 90°/s 关节速度上限；恢复按实际周期计算运动预算，最多 0.2 s。恢复原 45° IK 实测偏差上限和网关 20° 单步保护，不再叠加新版默认的 5° 驱动领先与 TCP 领先限制。求解器同时使用机器已有电机行程范围，防止旧版在不可达位置下发越界角度；这些范围不需要额外 Home 标定。旧版某些位置不可达的问题仍保留，恢复模式不宣称扩大了工作空间。
+legacy 保留 Placo、位置/姿态权重 1/1、`posture_weight=5e-4`、90°/s 关节速度上限和最多 0.2 s 的实际周期预算。45° IK 实测领先保护和网关 20° 单步保护继续生效。Home 映射转换后的左右臂限位同时用于 Placo 与输出，保留电机原有行程。没有叠加另一模式的 5° 驱动领先或 TCP 领先限制。零位修正明显改善已知目标的跟踪，但默认姿态约束仍可能阻碍完全伸直。
 
 显式 calibrated 模式继续使用标定模型和 TCP 领先限制；连续五帧残差较大才尝试一个附近初值，额外预算默认 6 ms（在 QP 迭代之间检查，单次 QP 不可抢占）。默认旧版模式不启用这项多初值策略。
 
@@ -152,7 +220,20 @@ src/lerobot/vr_gateway/assets/alohamini2pro/urdf/alohamini2pro.urdf
 
 控制循环把 IK 与串口耗时计入 40 ms 周期，只等待剩余时间；若本轮已经超时，下一轮直接处理最新输入，不积压补发。诊断栏显示实际控制 Hz。电机寄存器参数 2000 和配置 25 Hz 都不代表实机必然达到相应速度；靠近电机行程边界时仍可能无法继续某些动作。
 
-离线验收见 `tests/vr_gateway/test_legacy_ik.py`、`test_wrist_controls.py`、`test_server.py`、`test_calibrated_ik.py` 和 `test_frontend.cjs`。运行前端回放：`node tests/vr_gateway/test_frontend.cjs`。12 组 d569ef96 原始输出对照（含 3 组旋转）均通过，并覆盖独立拧腕、左右转向、越过 180°、行程上限及重新握持。离线一致不代表实机跟随已验收；仍需检查实际方向、响应、再握持和不可达位置。当前模型没有完整碰撞检测。
+离线验收见 `tests/vr_gateway/test_legacy_home.py`、`test_legacy_ik.py`、`test_wrist_controls.py` 和 `test_server.py`。当前测试覆盖 Home 缺失/过期拒绝、双向转换、实际电机范围、不同对齐方向、拧腕及释放重握。零位改变后关节输出不再应与无零位的 d569ef96 快照相等。
+
+```bash
+# 不访问硬件：用归档成套标定比较接入前后
+python tests/vr_gateway/benchmark_legacy_home.py --output /tmp/legacy_home_replay.json
+# 使用已采集的本机文件，仍然只做离线合成回放
+python tests/vr_gateway/benchmark_legacy_home.py \
+  --arm-mapping-dir ~/.config/lerobot/alohamini/arm_mapping \
+  --calibration-json ~/.cache/huggingface/lerobot/calibration/robots/alohamini/AlohaMiniRobot.json \
+  --output /tmp/legacy_home_machine_replay.json
+node tests/vr_gateway/test_frontend.cjs
+```
+
+回放使用合成轨迹和理想反馈，不连接串口；不能替代当前机器的几何、真实方向、负载及完整工作空间验收。当前模型没有完整碰撞检测。
 
 画面像素回归：`uv run python tests/vr_gateway/check_video_render.py`，需要本机 Chrome/Chromium 和 websockets。仅加载实际静态 UI，检查完整 A-Frame 场景在 640×480、1280×720、480×360 之间切换及 0°/180° 旋转的四角像素，不连接机器人。该检查与 Quest 内的用户验收分别记录。
 
@@ -197,6 +278,7 @@ src/lerobot/vr_gateway/assets/alohamini2pro/urdf/alohamini2pro.urdf
 | `adb devices` 看不到 Quest | USB 调试未开启、线缆只充电、设备未授权 | 打开开发者模式和 USB 调试，重新插线并确认授权。 |
 | `adb reverse` 失败 | ADB 未连上、端口被占用、Quest 断链 | 先 `adb reverse --remove-all` 再重试。 |
 | 页面能开但 VR 不进 | 不是 `localhost` 访问、WebXR 不支持、桥接失败 | 确认 Quest 访问的是 `http://localhost:8000/`。 |
+| 启动报 `Arm mapping missing` / `calibration differs` | Home 缺失或与当前电机标定不匹配 | 按首次 Home 流程采集/核对，检查 `--arm-mapping-dir`。 |
 | 手臂不动 | 扭矩未使能、calibration 不完整、状态未齐全 | 先核对 torque、health 和 observation。 |
 | 升降一直动 | A/B 被锁存或断线未停车 | 立即松开按键并按硬件 E-STOP。 |
 
@@ -213,7 +295,7 @@ src/lerobot/vr_gateway/assets/alohamini2pro/urdf/alohamini2pro.urdf
 conda activate lerobot_alohamini
 adb reverse --remove-all
 adb reverse tcp:8000 tcp:8000
-python -m lerobot.vr_gateway.server --robot-model alohamini2pro --host 0.0.0.0 --port 8000
+python -m lerobot.vr_gateway.server --robot-model alohamini2pro --arm-ik-mode legacy --host 0.0.0.0 --port 8000
 ```
 
 Quest 浏览器访问：

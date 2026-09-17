@@ -214,21 +214,20 @@ def make_vr_robot_config(
 
 def make_vr_arm_ik(calibration: dict, *, mode: str = "legacy", mapping_dir: Path | None = None, **options):
     """Choose the complete arm mapping and tuning without connecting to hardware."""
+    from .calibration.profile import DEFAULT_MAPPING_DIR, ArmMapping
+
+    if mode not in {"legacy", "calibrated"}:
+        raise ValueError(f"Unknown arm IK mode: {mode}")
+    mapping = ArmMapping.load(mapping_dir if mapping_dir is not None else DEFAULT_MAPPING_DIR, calibration)
     # CLI omissions defer to each mode's defaults, rather than mixing two profiles.
     options = {name: value for name, value in options.items() if value is not None}
     if mode == "legacy":
         from .legacy_ik import make_legacy_ik
 
-        return make_legacy_ik(calibration, joint_signs=ALOHAMINI_ROBOT_TO_URDF_JOINT_SIGNS, **options)
-    if mode == "calibrated":
-        from .calibrated_ik import make_calibrated_ik
-        from .calibration.profile import DEFAULT_MAPPING_DIR, ArmMapping
+        return make_legacy_ik(mapping, **options)
+    from .calibrated_ik import make_calibrated_ik
 
-        mapping = ArmMapping.load(
-            mapping_dir if mapping_dir is not None else DEFAULT_MAPPING_DIR, calibration
-        )
-        return make_calibrated_ik(mapping, **options)
-    raise ValueError(f"Unknown arm IK mode: {mode}")
+    return make_calibrated_ik(mapping, **options)
 
 
 class VRGateway:
@@ -602,7 +601,7 @@ class VRGateway:
                     return {"type": "ack", "for": "gripper", "status": "stale"}
                 mapping = getattr(self.arm_ik, "arm_mapping", None)
                 closure = float(np.clip(value, 0.0, 1.0))
-                if mapping is None:
+                if getattr(self.arm_ik, "mode", "legacy") == "legacy":
                     # Grippers remain RANGE_0_100 even with arm use_degrees=True.
                     # On both installed hands increasing encoder position opens;
                     # this uses existing motor calibration, not a Home mapping.
@@ -610,6 +609,8 @@ class VRGateway:
                         return {"type": "ack", "for": "gripper", "status": "unbound"}
                     target = 100.0 * (1.0 - closure)
                 else:
+                    if mapping is None:
+                        return {"type": "ack", "for": "gripper", "status": "unbound"}
                     entry = mapping.mappings[side]["joints"]["gripper"]
                     meta = mapping.metadata["motors"][f"arm_{side}_gripper"]
                     tick = entry["open_tick"] + closure * (entry["closed_tick"] - entry["open_tick"])
@@ -1057,9 +1058,7 @@ class VRGateway:
             "arm_frozen": self.arm_frozen,
             "calibrated": self.calibrated,
             "arm_mapping_loaded": getattr(self.arm_ik, "arm_mapping", None) is not None,
-            "arm_ik_mode": "calibrated"
-            if getattr(self.arm_ik, "arm_mapping", None) is not None
-            else "legacy",
+            "arm_ik_mode": getattr(self.arm_ik, "mode", "legacy"),
             "ik_available": self.arm_ik is not None,
             "arm_ik_active": bool(getattr(self.arm_ik, "active", False)),
             "arm_active_sides": sorted(getattr(self.arm_ik, "active_sides", ())),
@@ -1286,7 +1285,7 @@ def main() -> None:  # pragma: no cover - CLI convenience
         "--arm-ik-mode",
         choices=["legacy", "calibrated"],
         default="legacy",
-        help="legacy: d569ef96 mapping, no Folded Home required; calibrated: explicit Home mapping",
+        help="legacy: original CAD gestures; calibrated: standard base/TCP; both require captured Home",
     )
     parser.add_argument(
         "--position-scale", type=float, default=None, help="legacy default 0.5; calibrated 1.0"
@@ -1318,7 +1317,7 @@ def main() -> None:  # pragma: no cover - CLI convenience
         "--arm-mapping-dir",
         type=Path,
         default=None,
-        help="calibrated mode only: defaults to ~/.config/lerobot/alohamini/arm_mapping",
+        help="Home mapping for either mode; defaults to ~/.config/lerobot/alohamini/arm_mapping",
     )
     args = parser.parse_args()
     os.environ["LEROBOT_VR_DIAGNOSTICS"] = "1" if args.diagnostics else "0"

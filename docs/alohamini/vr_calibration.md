@@ -2,6 +2,8 @@
 
 这套流程移植自 `alohamini_ros2` 的 `calibrate_arms`、`sync_arm_mapping` 和 `JointMapper`，直接在 LeRobot Python 环境运行。默认只访问左右臂串口，不需要 ROS、`ros2`、RViz、MoveIt 或启动 LeRobot Host。
 
+**默认 legacy 现在也执行本页的 Home 流程**，复用采集文件而不切换遥操模式。运行总流程见 [VR 上线与操作记录](vr_gateway.md)。
+
 电机标定确定编码器零偏和行程；Home 确认将真实机械姿态绑定到 URDF。两者缺一不可。Quest 的 Y 键只对齐操作者身体方向，不能代替机械零点确认。
 
 ## 环境与文件
@@ -35,10 +37,10 @@ uv pip install -e '.[feetech,pyzmq-dep,kinematics,matplotlib-dep]' fastapi 'uvic
 
 ```bash
 python -m lerobot.vr_gateway.calibration.verify_arm_mapping \
-  --show-home --output-dir /tmp/alohamini_home
+  --arm-ik-mode legacy --show-home --output-dir /tmp/alohamini_home
 ```
 
-打开 `/tmp/alohamini_home/arm_reference.svg`，在扭矩关闭时，按原 ROS2 流程手动摆放左右臂到对应的折叠 Home，并闭合夹爪。图中展示两侧肩、肘、腕、TCP 的侧视、正视和俯视位置；终端同时列出 CAD 参考角度。图是连杆关节位置示意，不是碰撞模型。需要确认实物上臂、前臂和腕部方向与图一致，不能把任意静止姿态或者电机行程中点当成 Home。
+打开 `/tmp/alohamini_home/arm_reference.svg`，在扭矩关闭时，按原 ROS2 流程手动摆放左右臂到对应的折叠 Home，并闭合夹爪。图中使用机身前/左/上坐标，展示 legacy 原 CAD 的两侧肩、肘、腕、Moving_Jaw 末端的侧视、正视和俯视位置；终端同时列出 CAD 参考角度。图是连杆关节位置示意，不是碰撞模型。需要确认实物上臂、前臂和腕部方向与图一致，不能把任意静止姿态或者电机行程中点当成 Home。
 
 从侧面看，这套参考姿态的上臂朝后、略向上，前臂折回来大致水平朝前，腕部与夹爪朝下；两臂分别位于机身两侧。它不是上臂与前臂并拢贴在机身上的任意“收纳姿态”。以参考图中的关节位置为准。
 
@@ -59,7 +61,7 @@ python -m lerobot.vr_gateway.calibration.sync_arm_mapping
   hardware_joint_map_right.yaml
 ```
 
-如果目录已存在，使用新的 `--output-dir`，避免覆盖先前记录。网关启动时通过 `--arm-mapping-dir` 选择新目录。`--calibration-json` 可指定其他电机 JSON；运行时该 JSON 必须与机器人实际加载的标定一致。
+已有且几何已确认的本机 Home 文件，若电机标定和机械安装未改变，可直接复用。需要重采时，如果目录已存在，使用新的 `--output-dir`，避免覆盖先前记录。网关启动时通过 `--arm-mapping-dir` 选择新目录。`--calibration-json` 可指定其他电机 JSON；运行时该 JSON 必须与机器人实际加载的标定一致。
 
 保留了可选的 `--host` / `--ssh-target` 读取现有 LeRobot Host 的功能；它只依赖 Python ZMQ，也不依赖 ROS。默认串口流程不需要 Host。
 
@@ -69,7 +71,7 @@ python -m lerobot.vr_gateway.calibration.sync_arm_mapping
 
 ```bash
 python -m lerobot.vr_gateway.calibration.verify_arm_mapping \
-  --read-hardware --expect-home --output-dir /tmp/alohamini_home_check
+  --arm-ik-mode legacy --read-hardware --expect-home --output-dir /tmp/alohamini_home_check
 ```
 
 检查 `/tmp/alohamini_home_check/arm_reference.svg` 和 `report.json`。命令检查完整行程的编码器/URDF 双向转换，并要求实测姿态距离本次 Home 参考不超过 2°。
@@ -80,7 +82,7 @@ python -m lerobot.vr_gateway.calibration.verify_arm_mapping \
 
 ```bash
 python -m lerobot.vr_gateway.server \
-  --robot-model alohamini2pro --host 0.0.0.0 --port 8000 \
+  --robot-model alohamini2pro --arm-ik-mode legacy --host 0.0.0.0 --port 8000 \
   --diagnostics true
 ```
 
@@ -92,7 +94,8 @@ python -m lerobot.vr_gateway.server \
 
 - 左右臂分别使用 `reference_tick`、`reference_q_rad`、`sign` 和编码器传动比，保留 4095/4096 的单位区别及周期分支处理。
 - 当前电机行程转换为 URDF 限位，同时进入 Placo 模型和输出保护。
-- 使用 ROS2 的标准基座（X 向前、Y 向左、Z 向上）及固定夹爪 TCP，统一平移与姿态的坐标变换，取消旧的平移反向补偿。
-- 肩肘姿态软约束减弱，允许靠近伸直；离线回归覆盖左右臂前伸和上伸可达目标。
+- legacy 保留原 CAD 基准、Moving_Jaw 末端和 swing/twist 手势；正确零位下取消旧的平移前后反向补偿。
+- legacy 保留 0.5 位移倍率、原速度与 IK 权重。本次仅接入机械参考及必要的方向修正；剩余伸展误差见 [离线验证记录](vr_legacy_home.md)。
+- `verify_arm_mapping --arm-ik-mode legacy` 默认显示实际使用的 legacy 模型；显式传入另一模式仍可检查对应的标准基座/TCP。
 
 URDF 连杆尺寸和轴线仍来自 ROS2 的 CAD 导出，原项目标记为 `cad_export_unverified`。移植完成不等于已完成当前实机的几何精度与完整工作空间验证。

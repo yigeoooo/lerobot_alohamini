@@ -64,6 +64,14 @@ function browser() {
   };
 }
 
+test('Legacy reports loaded Home without changing the displayed control mode', () => {
+  const ui = browser();
+  ui.status({ arm_ik_mode: 'legacy', arm_mapping_loaded: true });
+  assert.equal(ui.element('mapping-state').textContent, 'Legacy · Home 零位已加载');
+  ui.status({ arm_ik_mode: 'legacy', arm_mapping_loaded: false });
+  assert.equal(ui.element('mapping-state').textContent, 'Legacy · 缺少 Home 零位');
+});
+
 test('Trigger defaults closed, opens while pressed, closes on release; Grip stays independent', () => {
   const ui = browser();
   ui.step();

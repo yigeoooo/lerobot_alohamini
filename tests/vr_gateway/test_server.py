@@ -192,13 +192,18 @@ def test_video_preserves_720p_detail_and_does_not_upscale_smaller_frames():
 
 
 @pytest.mark.parametrize("side", ["left", "right"])
-def test_legacy_gripper_opens_and_closes_without_home_mapping_or_arm_grip(side):
+@pytest.mark.parametrize("home_loaded", [False, True])
+def test_legacy_gripper_keeps_motor_endpoints_with_or_without_home(side, home_loaded):
     class GripperRobot(_RobotStub):
         def get_observation(self):
             return {**super().get_observation(), "arm_left_gripper.pos": 5.0, "arm_right_gripper.pos": 6.0}
 
     gateway = _session_gateway(GripperRobot())
-    assert getattr(gateway.arm_ik, "arm_mapping", None) is None
+    gateway.arm_ik.mode = "legacy"
+    gateway.arm_ik.arm_mapping = SimpleNamespace() if home_loaded else None
+    status = gateway.status_payload()
+    assert status["arm_ik_mode"] == "legacy"
+    assert status["arm_mapping_loaded"] is home_loaded
     for closure, expected in [(1.0, 0.0), (0.0, 100.0), (0.5, 50.0)]:
         for _ in range(6):
             gateway.capture_observation()
@@ -398,6 +403,7 @@ def test_pose_age_is_checked_after_waiting_in_mailbox():
 
 def test_gripper_trigger_is_independent_and_uses_calibrated_endpoints():
     gateway = _session_gateway()
+    gateway.arm_ik.mode = "calibrated"
     gateway.arm_ik.arm_mapping = SimpleNamespace(
         mappings={"left": {"joints": {"gripper": {"open_tick": 3400, "closed_tick": 2100}}}},
         metadata={"motors": {"arm_left_gripper": {"range_min": 2000, "range_max": 3500}}},

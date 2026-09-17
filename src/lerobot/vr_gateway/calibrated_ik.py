@@ -28,7 +28,7 @@ def make_calibrated_ik(mapping: ArmMapping, **options) -> AlohaMiniDualArmIK:
     # to their limits while the physical arm is still near Home.
     options.setdefault("max_target_position_lead_m", 0.025)
     options.setdefault("max_target_orientation_lead_rad", np.deg2rad(15.0))
-    return AlohaMiniDualArmIK(
+    ik = AlohaMiniDualArmIK(
         ASSET_DIR / "urdf/alohamini2pro_kinematic.urdf",
         arm_mapping=mapping,
         tip_frame_template="{side}_tcp",
@@ -38,3 +38,5 @@ def make_calibrated_ik(mapping: ArmMapping, **options) -> AlohaMiniDualArmIK:
         home_before_engage=False,
         **options,
     )
+    ik.mode = "calibrated"
+    return ik
