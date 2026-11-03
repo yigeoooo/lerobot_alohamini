@@ -301,6 +301,7 @@ class AlohaMini(Robot):
         self._arm_sent_positions: dict[str, float] = {}
         self._arm_sent_at: float | None = None
         self._joint_stall_last_warning: dict[str, float] = {}
+        self._arm_overcurrent_last_warning: dict[str, float] = {}
         self._joint_hold_events = 0
         self._safety_session_id = uuid4().hex
         self._last_currents_log_t = 0.0
@@ -1068,7 +1069,14 @@ class AlohaMini(Robot):
     def _limit_joint_goal_by_current(
         self, bus: FeetechMotorsBus, goal_pos: dict[str, float]
     ) -> dict[str, float]:
-        """Warn about stalled joints without changing targets; overload trips remain active."""
+        """Hold a joint that is pushing into a current-limited obstruction.
+
+        The old path only logged a stall and left the same target active until the
+        global current watchdog disconnected the robot.  Once a high-current joint
+        has made no progress for the collision window, hold its measured position.
+        A target in the opposite direction releases the hold so the operator can
+        back away from the obstruction.
+        """
         target_keys = [
             key
             for key in goal_pos
@@ -1121,14 +1129,21 @@ class AlohaMini(Robot):
                 if now - candidate.started_at < _JOINT_COLLISION_DURATION_S:
                     continue
 
+                hold_goal = present
+                self._joint_hold_goal[motor] = hold_goal
+                self._joint_hold_direction[motor] = -command_direction
+                self._joint_hold_events += 1
+                limited_goal_pos[goal_key] = hold_goal
+                self._joint_stall_candidates.pop(motor, None)
                 if now - self._joint_stall_last_warning.get(motor, -math.inf) >= 5.0:
                     logger.warning(
                         "Joint stall suspected: %s, %.1f mA, error=%.2f deg, progress=%.2f deg; "
-                        "target unchanged, overload protection remains active",
+                        "holding %.2f until the command reverses",
                         motor,
                         current_ma,
                         command_error,
                         progress,
+                        hold_goal,
                     )
                     self._joint_stall_last_warning[motor] = now
                 continue
@@ -1228,6 +1243,20 @@ class AlohaMini(Robot):
                 ),
             ):
                 if _has_sustained_overcurrent(timer, name, current_ma, limit_ma, now, duration_s):
+                    if name.startswith("arm_"):
+                        # Arm targets are held by _limit_joint_goal_by_current(),
+                        # which can distinguish an outward push from a safe retreat.
+                        # Do not tear down the whole gateway before that hold can run.
+                        if now - self._arm_overcurrent_last_warning.get(name, -math.inf) >= 1.0:
+                            logger.warning(
+                                "Arm overcurrent detected: %s %.1f mA >= %.1f mA; "
+                                "outward motion will be held until the command reverses",
+                                name,
+                                current_ma,
+                                limit_ma,
+                            )
+                            self._arm_overcurrent_last_warning[name] = now
+                        continue
                     tripped = (name, current_ma, limit_ma, duration_s, cause)
                     break
             if tripped is not None:

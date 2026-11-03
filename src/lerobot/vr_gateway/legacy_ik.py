@@ -105,7 +105,10 @@ class LegacyArmIK(AlohaMiniDualArmIK):
 
 
 def make_legacy_ik(mapping: ArmMapping, **options) -> LegacyArmIK:
-    options.setdefault("position_scale", 0.5)
+    # This mode is intentionally clutch-relative, but a controller displacement
+    # must reach the follower one-for-one.  The old 0.5 gain made a fully extended
+    # hand move the robot only about halfway to the corresponding pose.
+    options.setdefault("position_scale", 1.0)
     options.setdefault("posture_weight", 5e-4)
     options.setdefault("retry_budget_s", 0.0)
     # With the physical zero restored, CAD -Y is forward. The old XR-Z

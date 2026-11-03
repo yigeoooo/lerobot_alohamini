@@ -54,7 +54,7 @@ def test_legacy_home_keeps_legacy_control_defaults_and_current_pose(legacy_ik_fa
     assert ik.mode == "legacy"
     assert ik.arm_mapping is not None
     assert ik.home_before_engage is False
-    assert ik.position_scale == 0.5
+    assert ik.position_scale == 1.0
     assert ik.posture_weight == 5e-4
     assert ik.orientation_weight == 1.0
     assert ik.retry_budget_s == 0.0

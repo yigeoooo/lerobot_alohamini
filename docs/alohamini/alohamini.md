@@ -162,12 +162,13 @@ Motor-current protection uses the actuator ratings below:
 A joint stall warning requires the current threshold, at least 2° of command error, and
 less than 0.2° of progress toward the target over 150 ms. Position differences are
 converted to degrees using the motor calibration, including when commands use
-normalized coordinates. This first stage logs a warning at most once every five
-seconds per motor; it does not hold or replace joint targets. The Host supervises
-active targets every control cycle, including cycles without new commands.
-Sustained overload stops the robot after 650 ms; near-stall current stops it after
-80 ms. Durations use elapsed time; detection occurs on the next feedback sample.
-The gripper's separate 0.5 A threshold controls contact force.
+normalized coordinates. When an arm joint remains stalled, its target is replaced by
+the measured position and the joint is held there; only a command in the reverse
+direction releases that hold. This prevents a VR hand that stays at an arm limit from
+continuing to push the servo. The gripper's separate 0.5 A threshold has the same
+reverse-to-release behavior. Arm current protection therefore keeps the gateway alive
+and reports the protected joint to the VR UI. Base and lift overcurrent protection
+still stops the robot because those axes have no arm-joint retreat command.
 
 The Host grants control to the first command client and rejects other writers.
 After that client stops sending for the watchdog interval (1 second by default),

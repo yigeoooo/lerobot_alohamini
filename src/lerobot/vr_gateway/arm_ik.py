@@ -717,6 +717,7 @@ class AlohaMiniDualArmIK:
         self._last_output: dict[str, np.ndarray | None] = dict.fromkeys(SIDES)
         self._last_time: float | None = None
         self._warned_invalid_pose = False
+        self._warned_limit_blocks: set[tuple[str, str, str]] = set()
         self._engage_reason: str | None = None
         self._body_basis = self._body_basis_rotation @ self._vr_to_robot
 
@@ -964,6 +965,43 @@ class AlohaMiniDualArmIK:
                         warnings.append({"side": side, "joint": joint, "bound": "upper"})
                         break
         return warnings
+
+    def _guard_joint_limits(
+        self, side: str, command: np.ndarray, measured: np.ndarray | None
+    ) -> np.ndarray:
+        """Prevent a target from continuing into an installed joint limit.
+
+        Placo clips its solution to the model bounds, but repeatedly sending that
+        boundary target still makes a physical servo push against its stop.  Hold the
+        measured position when the requested step points outward; an inward hand
+        movement immediately clears the guard and is allowed through.
+        """
+        if measured is None:
+            return command
+        guarded = np.asarray(command, dtype=float).copy()
+        limits = self.joint_limits_deg[side]
+        for index, joint in enumerate(ARM_JOINTS):
+            value = float(measured[index])
+            requested = float(guarded[index])
+            bound = None
+            if value <= limits[index, 0] + 0.5 and requested < value:
+                bound = "lower"
+            elif value >= limits[index, 1] - 0.5 and requested > value:
+                bound = "upper"
+            token = (side, joint, bound) if bound is not None else None
+            if token is not None:
+                guarded[index] = float(np.clip(value, limits[index, 0], limits[index, 1]))
+                if token not in self._warned_limit_blocks:
+                    logger.warning(
+                        "VR joint limit protection: %s %s bound; outward command held until the hand retreats",
+                        side,
+                        joint,
+                    )
+                    self._warned_limit_blocks.add(token)
+            else:
+                self._warned_limit_blocks.discard((side, joint, "lower"))
+                self._warned_limit_blocks.discard((side, joint, "upper"))
+        return guarded
 
     def _is_at_home_posture(self, state: dict[str, Any]) -> bool:
         for side in SIDES:
@@ -1431,6 +1469,7 @@ class AlohaMiniDualArmIK:
                         measured - self.max_state_deviation_deg,
                         measured + self.max_state_deviation_deg,
                     )
+            command = self._guard_joint_limits(side, command, self._measured_urdf_deg(side, state))
             solution[side] = np.clip(command, limits[:, 0], limits[:, 1])
 
         out: dict[str, float] = {}

@@ -332,8 +332,8 @@ def test_joint_current_warning_uses_elapsed_time(monkeypatch, caplog) -> None:
 
     assert first == goal
     assert second == goal
-    assert held == goal
-    assert robot._joint_hold_goal == {}
+    assert held == {"arm_left_elbow_flex.pos": 1.0}
+    assert robot._joint_hold_goal == {"arm_left_elbow_flex": 1.0}
     assert "Joint stall suspected" in caplog.text
 
 
@@ -419,7 +419,7 @@ def test_slow_motion_uses_physical_degrees(monkeypatch, frequency_hz, norm_mode,
 
 
 @pytest.mark.parametrize("frequency_hz", [30, 50])
-def test_idle_host_cycles_warn_without_holding_or_rewriting_targets(monkeypatch, frequency_hz, caplog):
+def test_idle_host_cycles_warn_and_hold_stalled_targets(monkeypatch, frequency_hz, caplog):
     bus = FakeBus(current_raw=600.0)
     robot = make_robot_feedback_stub(bus)
     motor = "arm_left_elbow_flex"
@@ -431,18 +431,22 @@ def test_idle_host_cycles_warn_without_holding_or_rewriting_targets(monkeypatch,
     bus.writes.clear()
 
     warning_time = None
+    held_correction = {}
     for sample in range(1, frequency_hz * 6):
         now = sample / frequency_hz
         robot._feedback_positions = {motor: 1.0}
         robot._feedback_currents_raw = robot.read_and_check_currents(raw=True)
-        assert robot.supervise_arm_motion() == {}
-        if caplog.records and warning_time is None:
+        corrections = robot.supervise_arm_motion()
+        if corrections:
+            held_correction = corrections
+        if any("Joint stall suspected" in record.message for record in caplog.records) and warning_time is None:
             warning_time = now
     assert 0.150 <= warning_time < 0.150 + 1 / frequency_hz
-    assert len(caplog.records) == 2  # At most one warning per motor every five seconds.
-    assert bus.writes == []
-    assert robot._joint_hold_goal == {}
-    assert robot._joint_hold_events == 0
+    assert sum("Joint stall suspected" in record.message for record in caplog.records) == 1
+    assert held_correction == {key: 1.0}
+    assert bus.writes
+    assert robot._joint_hold_goal == {motor: 1.0}
+    assert robot._joint_hold_events == 1
     assert robot._arm_goal_positions == {key: 10.0}
 
 
@@ -480,7 +484,7 @@ def test_target_reversal_restarts_stall_window(monkeypatch) -> None:
     assert robot._limit_joint_goal_by_current(bus, retreat) == retreat
 
 
-def test_encoder_jitter_still_warns_without_holding(monkeypatch, caplog) -> None:
+def test_encoder_jitter_warns_and_holds(monkeypatch, caplog) -> None:
     bus = FakeBus()
     robot = make_robot_feedback_stub(bus)
     motor = "arm_left_elbow_flex"
@@ -492,8 +496,8 @@ def test_encoder_jitter_still_warns_without_holding(monkeypatch, caplog) -> None
         robot._feedback_positions[motor] = 1.0 + (0.08 if sample % 2 else 0.0)
         result = robot._limit_joint_goal_by_current(bus, goal)
     assert "Joint stall suspected" in caplog.text
-    assert robot._joint_hold_goal == {}
-    assert result == goal
+    assert robot._joint_hold_goal == {motor: pytest.approx(1.0)}
+    assert result == {motor + ".pos": 1.0}
 
 
 def test_partial_command_keeps_other_active_arm_targets(monkeypatch) -> None:
@@ -585,7 +589,7 @@ def test_current_limits_reject_unknown_motor_model() -> None:
 
 
 @pytest.mark.parametrize(("current_raw", "duration"), [(-700.0, 0.650), (-1300.0, 0.080)])
-def test_overcurrent_stops_and_disconnects_after_elapsed_time(monkeypatch, current_raw, duration) -> None:
+def test_arm_overcurrent_warns_without_disconnecting(monkeypatch, current_raw, duration, caplog) -> None:
     bus = FakeBus(current_raw=current_raw)
     robot = make_robot_feedback_stub(bus)
     events = []
@@ -597,9 +601,9 @@ def test_overcurrent_stops_and_disconnects_after_elapsed_time(monkeypatch, curre
     assert robot.read_and_check_currents(raw=True)["arm_left_elbow_flex"] == current_raw
     assert robot.read_and_check_currents(raw=True)["arm_left_elbow_flex"] == current_raw
     assert events == []
-    with pytest.raises(SystemExit, match="1"):
-        robot.read_and_check_currents(raw=True)
-    assert events == ["stop", "disconnect"]
+    assert robot.read_and_check_currents(raw=True)["arm_left_elbow_flex"] == current_raw
+    assert events == []
+    assert "Arm overcurrent detected" in caplog.text
 
 
 def make_gripper_feedback_stub(*, present: float, current_raw: float) -> tuple[AlohaMini, FakeBus]:

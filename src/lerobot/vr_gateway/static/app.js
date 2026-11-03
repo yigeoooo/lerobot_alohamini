@@ -69,14 +69,20 @@
     drawHUD();
   }
 
-  function showLimitWarnings(warnings) {
+  function showLimitWarnings(warnings, protectionWarnings = []) {
     const names = { shoulder_pan: '肩部转向', shoulder_lift: '肩部抬升', elbow_flex: '肘关节',
-      wrist_flex: '腕俯仰', wrist_yaw: '腕偏航', wrist_roll: '腕滚转' };
+      wrist_flex: '腕俯仰', wrist_yaw: '腕偏航', wrist_roll: '腕滚转', gripper: '夹爪' };
     const groups = ['left', 'right'].map((side) => {
-      const joints = warnings.filter((warning) => warning.side === side).map((warning) => names[warning.joint] || warning.joint);
+      const joints = [...warnings, ...protectionWarnings].filter((warning) => warning.side === side).map((warning) => {
+        const name = names[warning.joint] || warning.joint;
+        return warning.bound === 'current' ? `${name}（电流保护）` : name;
+      });
       return joints.length ? `${side === 'left' ? '左臂' : '右臂'} ${joints.join('、')}` : '';
     }).filter(Boolean);
-    const next = groups.length ? `限位警告：${groups.join('；')}` : '';
+    const next = groups.length
+      ? `${protectionWarnings.length ? '保护警告' : '限位警告'}：${groups.join('；')}` +
+        (protectionWarnings.length ? '；请向反方向移动解除保护' : '')
+      : '';
     if (next && next !== limitWarning) logInput(next);
     limitWarning = next;
     $('limit-warning').textContent = next;
@@ -100,7 +106,10 @@
   function reportStatus(message) {
     health = message;
     healthAt = performance.now();
-    showLimitWarnings(message.feedback_fresh ? message.joint_limit_warnings || [] : []);
+    showLimitWarnings(
+      message.feedback_fresh ? message.joint_limit_warnings || [] : [],
+      message.feedback_fresh ? message.joint_protection_warnings || [] : [],
+    );
     const torque = { enabled: '力矩已使能', disabled: '力矩未使能', mixed: '部分力矩使能', unknown: '力矩未知' };
     const reason = {
       tracking_lost: '追踪丢失，请松开再握持', stale_pose: '输入过期，请松开再握持',
@@ -221,7 +230,7 @@
   }
   $('align').onclick = align;
   $('settings').onclick = () => {
-    $('position-scale').value = health?.arm_settings?.position_scale ?? 0.5;
+    $('position-scale').value = health?.arm_settings?.position_scale ?? 1.0;
     $('joint-speed').value = health?.arm_settings?.max_joint_speed_deg_s ?? 90;
     $('video-rotation').value = String(videoRotation);
     $('settings-dialog').showModal();

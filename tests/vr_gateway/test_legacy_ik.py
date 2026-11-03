@@ -21,7 +21,7 @@ def test_legacy_target_direction_after_alignment(case, legacy_ik_factory):
     ik = legacy_ik_factory(fixed_dt=0.04, deadband_m=0.0, deadband_rad=0.0)
     assert ik.arm_mapping is not None
     assert ik.home_before_engage is False
-    assert ik.position_scale == 0.5
+    assert ik.position_scale == 1.0
     yaw = np.deg2rad(case["yaw_deg"])
     c, s = np.cos(yaw), np.sin(yaw)
     heading = np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]])
@@ -46,7 +46,7 @@ def test_legacy_target_direction_after_alignment(case, legacy_ik_factory):
             # Home removes the old empirical forward reflection. Motor angles
             # now change with Home, so old joint-output snapshots do not apply.
             delta = np.array(case["delta"])
-            expected_position = np.array([-delta[0], delta[2], delta[1]]) * 0.5
+            expected_position = np.array([-delta[0], delta[2], delta[1]])
             expected_rotation = np.array(
                 [[np.cos(angle), -np.sin(angle), 0], [np.sin(angle), np.cos(angle), 0], [0, 0, 1]]
             )

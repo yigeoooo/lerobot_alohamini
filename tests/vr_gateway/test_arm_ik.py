@@ -234,6 +234,18 @@ def test_smoothing_deadband_and_joint_rate_limit_are_pure_and_accumulative(arm_i
     assert arm_ik_module.rate_compensated_smoothing(0.5, 0.08, 0.04) == pytest.approx(0.75)
 
 
+def test_joint_limit_guard_blocks_outward_motion_but_allows_retreat(arm_ik_module):
+    ik = object.__new__(arm_ik_module.AlohaMiniDualArmIK)
+    ik.joint_limits_deg = {side: np.array([[-1.0, 1.0]] * 6) for side in arm_ik_module.SIDES}
+    ik._warned_limit_blocks = set()
+    measured = np.array([0.7, 0.0, 0.0, 0.0, 0.0, 0.0])
+    outward = np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    guarded = ik._guard_joint_limits("left", outward, measured)
+    assert guarded[0] == pytest.approx(measured[0])
+    inward = np.array([0.2, 0.0, 0.0, 0.0, 0.0, 0.0])
+    np.testing.assert_allclose(ik._guard_joint_limits("left", inward, measured), inward)
+
+
 def _make_state(arm_ik):
     state = {"lift_axis.height_mm": 120.0}
     for side in arm_ik.SIDES:

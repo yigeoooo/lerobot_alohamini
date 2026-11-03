@@ -295,4 +295,6 @@ test('joint limit warning appears once, clears on recovery and on stale feedback
   ui.status(message);
   ui.status({ ...message, feedback_fresh: false });
   assert.equal(ui.element('limit-warning').hidden, true);
+  ui.status({ joint_protection_warnings: [{ side: 'left', joint: 'elbow_flex', bound: 'current' }] });
+  assert.match(ui.element('limit-warning').textContent, /保护警告.*左臂.*电流保护/);
 });

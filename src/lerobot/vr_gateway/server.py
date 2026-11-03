@@ -1053,9 +1053,21 @@ class VRGateway:
         timings = getattr(self.robot, "logs", {}) or {}
         limit_reader = getattr(self.arm_ik, "joint_limit_warnings", None)
         limit_warnings = limit_reader(self._state()) if limit_reader and self._feedback_fresh() else []
+        safety_reader = getattr(self.robot, "get_safety_status", None)
+        try:
+            safety = safety_reader() if callable(safety_reader) else {}
+        except Exception:
+            safety = {}
+        current_holds = []
+        for motor in safety.get("joint_holds", {}) if isinstance(safety, dict) else ():
+            parts = str(motor).split("_", 2)
+            if len(parts) == 3 and parts[0] == "arm" and parts[1] in SIDES:
+                current_holds.append({"side": parts[1], "joint": parts[2], "bound": "current"})
         return {
             "type": "status",
             "joint_limit_warnings": limit_warnings,
+            "joint_protection_warnings": current_holds,
+            "joint_hold_events": safety.get("joint_hold_events", 0) if isinstance(safety, dict) else 0,
             "robot_connected": bool(getattr(self.robot, "is_connected", False)),
             "feedback_fresh": self._feedback_fresh(),
             "feedback_age_ms": None
@@ -1209,6 +1221,7 @@ def create_app(robot: RobotLike, config: VRGatewayConfig | None = None, arm_ik: 
                 tick = 0
                 last_status = 0.0
                 last_limits = None
+                last_protection = None
                 while True:
                     started_at = time.monotonic()
                     observation = await robot_io(gateway.capture_observation)
@@ -1223,10 +1236,12 @@ def create_app(robot: RobotLike, config: VRGatewayConfig | None = None, arm_ik: 
                     status = gateway.status_payload()
                     if (
                         status["joint_limit_warnings"] != last_limits
+                        or status["joint_protection_warnings"] != last_protection
                         or now - last_status >= gateway.config.status_period_s
                     ):
                         last_status = now
                         last_limits = status["joint_limit_warnings"]
+                        last_protection = status["joint_protection_warnings"]
                         await send_json(status)
                     tick += 1
                     await asyncio.sleep(max(0.0, interval - (time.monotonic() - started_at)))
@@ -1339,7 +1354,7 @@ def main() -> None:  # pragma: no cover - CLI convenience
         help="legacy: original CAD gestures; calibrated: standard base/TCP; both require captured Home",
     )
     parser.add_argument(
-        "--position-scale", type=float, default=None, help="legacy default 0.5; calibrated 1.0"
+        "--position-scale", type=float, default=None, help="legacy and calibrated default 1.0"
     )
     parser.add_argument("--max-joint-speed-deg-s", type=float, default=90.0)
     parser.add_argument(
