@@ -72,6 +72,7 @@ ALOHAMINI_ROBOT_TO_URDF_JOINT_SIGNS = {
 VR_ARM_GOAL_VELOCITY = 2000
 VR_ARM_ACCELERATION = 100
 VR_MAX_RELATIVE_TARGET_DEG = 5.0
+RECORDING_PROTOCOL = 2
 
 BASE_VELOCITY_KEYS = ("x.vel", "y.vel", "theta.vel")
 LIFT_HEIGHT_KEY = "lift_axis.height_mm"
@@ -131,6 +132,12 @@ class VRGatewayConfig:
     gripper_action_key: str = "gripper.position"
     max_feedback_age_s: float = 0.5
     arm_pose_timeout_s: float = 0.3
+    # Dataset samples are captured on the Pi at the same cadence as the control
+    # loop, then written by the PC recorder.  Keep this independent from browser
+    # observation/video rates so recording does not silently inherit a 10 Hz UI
+    # polling cadence.
+    recording_fps: int = 25
+    recorder_heartbeat_timeout_s: float = 3.0
 
 
 @dataclass
@@ -286,6 +293,26 @@ class VRGateway:
         self._torque = dict.fromkeys(SIDES, "unknown")
         self._torque_sampled_at = 0.0
         self._watchdog_stopped = False
+        # The recorder is deliberately separate from the Quest operator lease.  A
+        # disconnected recorder must never block teleoperation, but its state must be
+        # visible to the operator before recording can be armed.
+        self._recorder_connected = False
+        self._recorder_ready = False
+        self._recorder_seen_at = 0.0
+        self._recorder_status: dict[str, Any] = {}
+        self._recording_active = False
+        self._recording_phase = "idle"
+        self._recording_saved_episode: int | None = None
+        self._recording_saved_frames = 0
+        self._recording_dataset_episode: int | None = None
+        self._recording_saved_dataset_episode: int | None = None
+        self._recording_episode = 0
+        self._recording_frames = 0
+        self._recording_started_at: float | None = None
+        self._recording_last_error: str | None = None
+        self._recording_camera_timestamps: dict[str, float] = {}
+        self._last_action: dict[str, Any] = {}
+        self._last_action_at: float | None = None
 
     @property
     def clutch_enabled(self) -> bool:
@@ -433,6 +460,15 @@ class VRGateway:
                 {key: action.get(key) for key in BASE_VELOCITY_KEYS},
             )
         result = self.robot.send_action(action)
+        # ``result`` contains the values accepted by the robot after safety
+        # processing.  Merge it over the complete held action so sparse browser
+        # updates become a valid full action vector for LeRobot recording.
+        self._last_action = {
+            key: _json_safe(value)
+            for key, value in {**action, **result}.items()
+            if not str(key).startswith("_")
+        }
+        self._last_action_at = time.monotonic()
         self._remember(result)
         for key in result:
             self._hold_reference.pop(key, None)
@@ -442,6 +478,239 @@ class VRGateway:
         if mark_activity:
             self.last_action_at = time.monotonic()
         return result
+
+    # ------------------------------------------------------------- recording state
+
+    def _recorder_online(self) -> bool:
+        return self._recorder_connected and (
+            time.monotonic() - self._recorder_seen_at <= self.config.recorder_heartbeat_timeout_s
+        )
+
+    def set_recorder_connected(self, connected: bool) -> None:
+        """Attach/detach the PC recorder without touching robot I/O."""
+        with self._mailbox_lock:
+            self._recorder_connected = bool(connected)
+            self._recorder_ready = False
+            if connected:
+                self._recorder_seen_at = time.monotonic()
+                self._recorder_status = {}
+                self._recording_active = False
+                self._recording_phase = "checking"
+                self._recording_frames = 0
+                self._recording_saved_episode = None
+                self._recording_saved_frames = 0
+                self._recording_dataset_episode = None
+                self._recording_saved_dataset_episode = None
+                self._recording_last_error = None
+            else:
+                self._recorder_seen_at = 0.0
+                if self._recording_phase in {"recording", "saving"}:
+                    self._recording_active = False
+                    self._recording_phase = "error"
+                    self._recording_last_error = "recorder_disconnected: PC 保存结果未确认"
+
+    def update_recorder_status(self, status: dict[str, Any]) -> None:
+        """Store the latest PC-side dataset status reported over ``/record``."""
+        with self._mailbox_lock:
+            self._recorder_status.update(
+                {key: _json_safe(value) for key, value in status.items() if key not in {"type", "protocol"}}
+            )
+            self._recorder_seen_at = time.monotonic()
+            phase = status.get("recorder_phase")
+            if phase == "checking":
+                self._recorder_ready = False
+            elif phase == "ready":
+                self._recorder_ready = bool(status.get("dataset_verified", True))
+                if self._recording_phase == "checking" and self._recorder_ready:
+                    self._recording_phase = "idle"
+            episode = status.get("episode")
+            if phase == "error" and (
+                episode == self._recording_episode or (episode is None and not self._recording_active)
+            ):
+                self._recorder_ready = False
+                self._recording_active = False
+                self._recording_phase = "error"
+                self._recording_last_error = f"PC 处理失败: {status.get('error') or 'unknown error'}"
+                return
+            if episode != self._recording_episode:
+                return
+            if phase == "recording" and status.get("dataset_episode_index") is not None:
+                self._recording_dataset_episode = int(status["dataset_episode_index"])
+            if (
+                phase == "saved"
+                and status.get("saved_episode") == self._recording_episode
+                and self._recording_phase in {"saving", "error"}
+            ):
+                frames = int(status.get("saved_episode_frames", 0))
+                if (
+                    frames <= 0
+                    or frames != self._recording_frames
+                    or not status.get("dataset_verified", True)
+                ):
+                    self._recording_phase = "error"
+                    self._recording_last_error = "PC 保存帧数与网关发送帧数不一致"
+                    self._recorder_ready = False
+                    return
+                self._recording_saved_episode = self._recording_episode
+                self._recording_saved_frames = frames
+                self._recording_saved_dataset_episode = status.get(
+                    "saved_dataset_episode", self._recording_dataset_episode
+                )
+                self._recording_phase = "saved"
+                self._recorder_ready = True
+
+    def _toggle_recording(self) -> dict[str, Any]:
+        with self._mailbox_lock:
+            if self._recording_phase == "saving":
+                return {"type": "ack", "for": "record_toggle", "status": "saving", "recording": False}
+            if not self._recorder_online():
+                self._recording_last_error = "recorder_unavailable"
+                return {
+                    "type": "ack",
+                    "for": "record_toggle",
+                    "status": "recorder_unavailable",
+                    "recording": False,
+                }
+            if not self._recorder_ready and not self._recording_active:
+                return {
+                    "type": "ack",
+                    "for": "record_toggle",
+                    "status": "recorder_not_ready",
+                    "recording": False,
+                }
+            self._recording_active = not self._recording_active
+            if self._recording_active:
+                self._recording_phase = "recording"
+                self._recording_episode += 1
+                self._recording_dataset_episode = int(self._recorder_status.get("dataset_episodes", 0))
+                self._recording_frames = 0
+                self._recording_started_at = time.monotonic()
+                self._recording_last_error = None
+                self._recording_camera_timestamps.clear()
+                state = "started"
+            else:
+                self._recording_phase = "saving"
+                self._recording_started_at = None
+                state = "stopped"
+            return {
+                "type": "ack",
+                "for": "record_toggle",
+                "status": state,
+                "recording": self._recording_active,
+                "phase": self._recording_phase,
+                "episode": self._recording_episode,
+                "dataset_episode": self._recording_dataset_episode,
+            }
+
+    def recording_state_payload(self, *, reason: str | None = None) -> dict[str, Any]:
+        with self._mailbox_lock:
+            payload = {
+                "type": "record_state",
+                "recording": self._recording_active,
+                "phase": self._recording_phase,
+                "episode": self._recording_episode,
+                "dataset_episode": self._recording_dataset_episode,
+                "frames": self._recording_frames,
+                "recorder_connected": self._recorder_online(),
+                "recorder_ready": self._recorder_ready,
+                "saved_episode": self._recording_saved_episode,
+                "saved_dataset_episode": self._recording_saved_dataset_episode,
+                "saved_frames": self._recording_saved_frames,
+                "error": self._recording_last_error,
+                "dataset_root": self._recorder_status.get("dataset_root"),
+                "dataset_repo_id": self._recorder_status.get("dataset_repo_id"),
+                "dataset_frames": self._recorder_status.get("dataset_frames", 0),
+                "dataset_episodes": self._recorder_status.get("dataset_episodes", 0),
+                "dataset_verified": self._recorder_status.get("dataset_verified", False),
+            }
+            if reason:
+                payload["reason"] = reason
+            return payload
+
+    def note_recording_sample(self) -> None:
+        with self._mailbox_lock:
+            if self._recording_phase in {"recording", "saving"}:
+                self._recording_frames += 1
+
+    def fail_recording(self, reason: str) -> None:
+        with self._mailbox_lock:
+            self._recording_active = False
+            self._recording_phase = "saving" if self._recorder_online() else "error"
+            self._recording_started_at = None
+            self._recording_last_error = reason
+
+    def recording_metadata(self) -> dict[str, Any]:
+        """Return the canonical LeRobot schema used by the PC recorder."""
+        from lerobot.utils.constants import ACTION, OBS_STR
+        from lerobot.utils.feature_utils import hw_to_dataset_features
+
+        observation_features = getattr(self.robot, "observation_features", {})
+        action_features = getattr(self.robot, "action_features", {})
+        features = {
+            **hw_to_dataset_features(action_features, ACTION),
+            **hw_to_dataset_features(observation_features, OBS_STR),
+        }
+        return {
+            "type": "record_metadata",
+            "protocol": RECORDING_PROTOCOL,
+            "fps": int(self.config.recording_fps),
+            "robot_type": getattr(self.robot, "name", self.robot.__class__.__name__),
+            "camera_names": list(self.config.camera_names),
+            "dataset_features": features,
+        }
+
+    def capture_recording_sample(self) -> dict[str, Any] | None:
+        """Capture one complete Pi-side sample for the PC recorder.
+
+        All configured cameras are required here. The browser preview may tolerate a
+        missing frame, while a dataset sample may not: inserting a stale/zero image
+        would make replay and policy training appear valid while corrupting alignment.
+        """
+        observation = self.capture_observation()
+        frames = self.capture_camera_frames()
+        missing = [name for name in self.config.camera_names if not isinstance(frames.get(name), np.ndarray)]
+        if missing:
+            raise RuntimeError(f"recording cameras unavailable: {', '.join(missing)}")
+        camera_timestamps: dict[str, float] = {}
+        for name in self.config.camera_names:
+            timestamp = getattr(getattr(self.robot, "cameras", {}).get(name), "latest_timestamp", None)
+            if timestamp is None:
+                continue
+            timestamp = float(timestamp)
+            previous = self._recording_camera_timestamps.get(name)
+            if previous is not None and timestamp <= previous:
+                if time.perf_counter() - timestamp > 0.5:
+                    raise RuntimeError(f"recording camera is stale: {name}")
+                # Camera acquisition is asynchronous. Do not duplicate a fresh
+                # image or stop the episode just because the next frame is pending.
+                return None
+            camera_timestamps[name] = timestamp
+        observation.update(frames)
+        payload = self.encode_payload(observation, include_frame=True)
+        missing_encoded = [name for name in self.config.camera_names if name not in payload["frames"]]
+        if missing_encoded:
+            raise RuntimeError(f"recording cameras failed to encode: {', '.join(missing_encoded)}")
+        state_timing = observation.get("_host_timing", {})
+        with self._mailbox_lock:
+            action = dict(self._last_action or self._held_action())
+            episode = self._recording_episode
+            sequence = self._recording_frames
+        action_features = getattr(self.robot, "action_features", {})
+        action = {key: _json_safe(action.get(key, 0.0)) for key in action_features}
+        self._recording_camera_timestamps.update(camera_timestamps)
+        return {
+            "type": "sample",
+            "episode": episode,
+            "sequence": sequence,
+            "state": payload["state"],
+            "action": action,
+            "frames": payload["frames"],
+            "state_sample_unix_ns": state_timing.get("state_sample_unix_ns"),
+            "camera_capture_monotonic_s": {
+                **state_timing.get("camera_capture_monotonic_s", {}),
+                **camera_timestamps,
+            },
+        }
 
     # ------------------------------------------------------------------- staging
 
@@ -497,6 +766,9 @@ class VRGateway:
 
         if kind in {"ping", "hello"}:
             return {"type": "ack", "for": kind}
+
+        if kind in {"record_toggle", "record"}:
+            return self._toggle_recording()
 
         if kind == "controller_pose":
             # Controller pose packets include the WebXR gamepad button values.
@@ -1063,6 +1335,10 @@ class VRGateway:
             parts = str(motor).split("_", 2)
             if len(parts) == 3 and parts[0] == "arm" and parts[1] in SIDES:
                 current_holds.append({"side": parts[1], "joint": parts[2], "bound": "current"})
+        recorder_online = self._recorder_online()
+        recorder_status = dict(self._recorder_status)
+        dataset_frames = recorder_status.get("dataset_frames", 0)
+        dataset_episodes = recorder_status.get("dataset_episodes", 0)
         return {
             "type": "status",
             "joint_limit_warnings": limit_warnings,
@@ -1113,6 +1389,26 @@ class VRGateway:
             "arm_engage_reason": getattr(self.arm_ik, "engage_reason", None),
             "arm_pending": self._pending_arm is not None,
             "arm_pending_reanchor": bool(self._pending_arm and self._pending_arm.get("reanchor")),
+            "recording_active": self._recording_active,
+            "recording_phase": self._recording_phase,
+            "recording_episode": self._recording_episode,
+            "recording_dataset_episode": self._recording_dataset_episode,
+            "recording_frames": self._recording_frames,
+            "recording_recorder_connected": recorder_online,
+            "recording_recorder_ready": self._recorder_ready,
+            "recording_saved_episode": self._recording_saved_episode,
+            "recording_saved_dataset_episode": self._recording_saved_dataset_episode,
+            "recording_saved_frames": self._recording_saved_frames,
+            "recording_recorder_last_seen_ms": round((time.monotonic() - self._recorder_seen_at) * 1000.0, 1)
+            if self._recorder_seen_at
+            else None,
+            "recording_dataset_root": recorder_status.get("dataset_root"),
+            "recording_dataset_repo_id": recorder_status.get("dataset_repo_id"),
+            "recording_dataset_exists": bool(recorder_status.get("dataset_exists", False)),
+            "recording_dataset_frames": int(dataset_frames or 0),
+            "recording_dataset_episodes": int(dataset_episodes or 0),
+            "recording_dataset_verified": bool(recorder_status.get("dataset_verified", False)),
+            "recording_last_error": self._recording_last_error,
             "control_hz": self.config.control_hz,
             **self.stats.as_dict(),
             "action_ms": round(float(timings.get("action_timing_ms", {}).get("action_total", 0.0)), 1),
@@ -1158,6 +1454,7 @@ def create_app(robot: RobotLike, config: VRGatewayConfig | None = None, arm_ik: 
 
     app = FastAPI(title="LeRobot AlohaMini VR Gateway", lifespan=lifespan)
     client_lock = asyncio.Lock()
+    recorder_lock = asyncio.Lock()
 
     async def robot_io(function):
         async with gateway._robot_lock:
@@ -1184,6 +1481,7 @@ def create_app(robot: RobotLike, config: VRGatewayConfig | None = None, arm_ik: 
             "ok": True,
             "robot_connected": bool(getattr(robot, "is_connected", False)),
             "cameras": list(gateway.config.camera_names),
+            **{key: value for key, value in gateway.status_payload().items() if key.startswith("recording_")},
             **gateway.stats.as_dict(),
         }
 
@@ -1253,7 +1551,14 @@ def create_app(robot: RobotLike, config: VRGatewayConfig | None = None, arm_ik: 
                         # Staging is pure Python bookkeeping, so it runs inline on the
                         # event loop: no lock, no thread hop, no queueing behind the buses.
                         reply = gateway.stage_message(json.loads(raw))
-                        if reply.get("for") in {"clutch", "estop", "align", "reanchor", "arm_settings"}:
+                        if reply.get("for") in {
+                            "clutch",
+                            "estop",
+                            "align",
+                            "reanchor",
+                            "arm_settings",
+                            "record_toggle",
+                        }:
                             await send_json(gateway.status_payload())
                     except (ValueError, TypeError, json.JSONDecodeError) as exc:
                         reply = {"type": "error", "error": str(exc)}
@@ -1278,6 +1583,107 @@ def create_app(robot: RobotLike, config: VRGatewayConfig | None = None, arm_ik: 
                 logger.exception("failed to stop robot on WebSocket disconnect")
             finally:
                 client_lock.release()
+
+    @app.websocket("/record")
+    async def recorder_endpoint(websocket: WebSocket) -> None:
+        """Dedicated Pi-to-PC recording channel.
+
+        The Quest operator lease and this recorder lease are intentionally separate:
+        control keeps running if the PC recorder disappears, while the recorder gets
+        an explicit state transition and the Quest status panel shows the loss.
+        """
+        await websocket.accept()
+        if recorder_lock.locked():
+            await websocket.send_json({"type": "error", "error": "Another recorder is connected"})
+            await websocket.close(code=1008)
+            return
+        await recorder_lock.acquire()
+
+        async def send_json(payload: dict[str, Any]) -> None:
+            await websocket.send_json(payload)
+
+        try:
+            raw = await asyncio.wait_for(websocket.receive_text(), timeout=10.0)
+            hello = json.loads(raw)
+            if str(hello.get("type", "")).lower() not in {"hello", "record_hello"}:
+                await send_json({"type": "error", "error": "Recorder must send a hello message first"})
+                await websocket.close(code=1003)
+                return
+            if hello.get("protocol") != RECORDING_PROTOCOL:
+                await send_json(
+                    {"type": "error", "error": "请更新并重启 PC record_vr.py（录制协议版本不匹配）"}
+                )
+                await websocket.close(code=1003)
+                return
+            gateway.set_recorder_connected(True)
+            gateway.update_recorder_status(
+                {
+                    "dataset_repo_id": hello.get("dataset_repo_id", hello.get("repo_id")),
+                    "dataset_root": hello.get("dataset_root", hello.get("root")),
+                    "dataset_exists": bool(hello.get("dataset_exists", False)),
+                    "dataset_frames": int(hello.get("dataset_frames", 0) or 0),
+                    "dataset_episodes": int(hello.get("dataset_episodes", 0) or 0),
+                }
+            )
+            await send_json(gateway.recording_metadata())
+            await send_json(gateway.recording_state_payload(reason="recorder_connected"))
+
+            async def stream_loop() -> None:
+                interval = 1.0 / max(gateway.config.recording_fps, 1)
+                previous_state: tuple[Any, ...] | None = None
+                while True:
+                    started = time.monotonic()
+                    state = gateway.recording_state_payload()
+                    # Samples carry their sequence/frame count. Emit a separate
+                    # state packet only when an episode changes, so 25 FPS capture
+                    # does not produce an extra control stream of status packets.
+                    signature = (state["phase"], state["episode"])
+                    if signature != previous_state:
+                        await send_json(state)
+                        previous_state = signature
+                    if state["phase"] in {"recording", "saving"}:
+                        if not state["recorder_connected"]:
+                            gateway.fail_recording("recorder_heartbeat_timeout")
+                            await send_json(
+                                gateway.recording_state_payload(reason="recorder_heartbeat_timeout")
+                            )
+                        elif state["recording"]:
+                            try:
+                                sample = await robot_io(gateway.capture_recording_sample)
+                                if sample is not None:
+                                    await send_json(sample)
+                                    gateway.note_recording_sample()
+                            except Exception as exc:
+                                logger.exception("VR recording sample failed")
+                                gateway.fail_recording(f"sample_failed: {exc}")
+                                await send_json(gateway.recording_state_payload(reason="sample_failed"))
+                    await asyncio.sleep(max(0.0, interval - (time.monotonic() - started)))
+
+            async def receive_loop() -> None:
+                while True:
+                    message = json.loads(await websocket.receive_text())
+                    kind = str(message.get("type", "")).lower()
+                    if kind in {"recorder_status", "status", "heartbeat", "ping"}:
+                        gateway.update_recorder_status(message)
+                    elif kind == "bye":
+                        return
+
+            tasks = [asyncio.create_task(loop()) for loop in (stream_loop, receive_loop)]
+            try:
+                done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    task.result()
+            finally:
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+        except (WebSocketDisconnect, TimeoutError):
+            logger.info("VR recorder disconnected before handshake/completion")
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            logger.warning("invalid VR recorder message: %s", exc)
+        finally:
+            gateway.set_recorder_connected(False)
+            recorder_lock.release()
 
     return app
 
@@ -1342,6 +1748,7 @@ def main() -> None:  # pragma: no cover - CLI convenience
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--ws", choices=["auto", "websockets", "wsproto"], default="auto")
     parser.add_argument("--control-hz", type=float, default=VRGatewayConfig.control_hz)
+    parser.add_argument("--recording-fps", type=int, default=VRGatewayConfig.recording_fps)
     parser.add_argument("--poll-hz", type=float, default=VRGatewayConfig.poll_hz)
     parser.add_argument("--video-hz", type=float, default=VRGatewayConfig.video_hz)
     parser.add_argument("--jpeg-quality", type=int, default=VRGatewayConfig.jpeg_quality)
@@ -1431,6 +1838,7 @@ def main() -> None:  # pragma: no cover - CLI convenience
     gateway_config = VRGatewayConfig(
         camera_names=tuple(robot_config.cameras),
         control_hz=args.control_hz,
+        recording_fps=args.recording_fps,
         poll_hz=args.poll_hz,
         video_hz=args.video_hz,
         jpeg_quality=args.jpeg_quality,

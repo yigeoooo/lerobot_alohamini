@@ -17,6 +17,7 @@
   const inputHistory = [];
   let ws;
   let health = null;
+  let recordingStatus = {};
   let healthAt = 0;
   let videoRotation = 0;
   let limitWarning = '';
@@ -31,6 +32,7 @@
   let prevA = false;
   let prevB = false;
   let prevY = false;
+  let prevRecord = false;
   let liftCommand = 0;
   let lastLiftSend = 0;
   const hands = Object.fromEntries(['left', 'right'].map((side) => [side, {
@@ -52,6 +54,7 @@
 
   function showDisconnected(text) {
     health = null;
+    prevRecord = false;
     for (const camera of cameras) {
       camera.pending = null;
       camera.at = null;
@@ -66,6 +69,55 @@
     }
     $('feedback-state').textContent = '反馈不可用';
     $('mapping-state').textContent = '标定待检查';
+    $('recording-state').textContent = '网关连接中断 · 录制 / 保存结果待确认';
+    $('recording-state').dataset.phase = 'error';
+    drawHUD();
+  }
+
+  function reportRecordingStatus(message) {
+    const previousPhase = recordingStatus.recording_phase;
+    const previousSaved = recordingStatus.recording_saved_dataset_episode ?? recordingStatus.recording_saved_episode;
+    for (const [key, value] of Object.entries(message)) {
+      if (key.startsWith('recording_') && value !== undefined) recordingStatus[key] = value;
+    }
+    message = recordingStatus;
+    const connected = !!message.recording_recorder_connected;
+    const root = message.recording_dataset_root || '未指定路径';
+    const frames = Number(message.recording_dataset_frames || 0);
+    const episodes = Number(message.recording_dataset_episodes || 0);
+    const episode = Number(message.recording_dataset_episode ?? message.recording_episode ?? 0);
+    const current = Number(message.recording_frames || 0);
+    const phase = message.recording_phase || (message.recording_active ? 'recording' : 'idle');
+    const error = message.recording_last_error;
+    const saved = message.recording_saved_dataset_episode ?? message.recording_saved_episode;
+    const savedFrames = Number(message.recording_saved_frames || 0);
+    let text;
+    if (phase === 'error') {
+      text = `录制 / 保存失败 · Ep ${episode}`;
+    } else if (!connected) {
+      text = 'PC 录制端未连接';
+      if (phase === 'recording' || phase === 'saving') text += ' · 本段保存结果待确认';
+    } else if (phase === 'checking') {
+      text = `PC 正在核对磁盘数据 · ${root}`;
+    } else if (phase === 'recording') {
+      text = `录制中 · Ep ${episode} · 本集 ${current} 帧 · 已保存 ${episodes} 条 / ${frames} 帧 · ${root}`;
+      if (saved != null) text += ` · 上集 Ep ${saved} 已保存`;
+    } else if (phase === 'saving') {
+      text = `${error ? '录制中断 · ' : ''}PC 保存中 · Ep ${episode} · ${current} 帧 · 请等待`;
+    } else if (phase === 'saved') {
+      text = `${error ? '录制中断 · ' : ''}Ep ${saved} 保存成功 · ${savedFrames} 帧 · 共 ${episodes} 条 / ${frames} 帧 · ${root}`;
+    } else if (message.recording_recorder_ready === false || message.recording_dataset_verified === false) {
+      text = `PC 正在核对磁盘数据 · ${root}`;
+    } else {
+      text = `PC 在线 · ${message.recording_dataset_verified ? '已核对 ' : ''}${episodes} 条 / ${frames} 帧 · ${root}`;
+    }
+    if (error) text += ` · 原因：${error}`;
+    $('recording-state').textContent = text;
+    $('recording-state').dataset.connected = String(connected);
+    $('recording-state').dataset.recording = String(phase === 'recording');
+    $('recording-state').dataset.phase = phase;
+    if ((phase === 'saved' && (previousPhase !== phase || previousSaved !== saved)) ||
+        (phase === 'error' && previousPhase !== phase)) logInput(text);
     drawHUD();
   }
 
@@ -132,6 +184,7 @@
       ? (message.arm_mapping_loaded ? 'Legacy · Home 零位已加载' : 'Legacy · 缺少 Home 零位')
       : (message.arm_mapping_loaded ? '机械标定已加载' : '机械标定不可用');
     $('feedback-state').textContent = message.feedback_fresh ? `反馈 ${Math.round(message.feedback_age_ms)} ms` : '反馈过期';
+    reportRecordingStatus(message);
     $('diagnostics').textContent = `IK ${message.ik_available ? '可用' : '不可用'} · 已发送 ${message.actions_sent} · ` +
       `拒绝 ${message.ik_rejected} · 过期 ${message.poses_stale} · 总线 ${message.action_ms} ms · 控制 ${message.control_hz_actual ?? '—'} Hz · 页面 cameras7`;
     $('tcp-info').textContent = `TCP: ${Object.values(message.tcp_frames || {}).join(' / ') || '未知'}`;
@@ -143,6 +196,7 @@
     ws.onopen = () => {
       lastBaseSent = null;
       for (const hand of Object.values(hands)) { hand.epoch++; hand.trigger = null; hand.triggerArmed = false; }
+      prevRecord = false;
       status.textContent = '网关已连接，等待机器人状态';
       send({ type: 'hello', client: 'webxr', protocol: 4 });
     };
@@ -160,7 +214,31 @@
         if (camera.enabled && frame?.jpeg_b64) queueCameraFrame(camera, frame.jpeg_b64);
       }
       if (message.type === 'status') reportStatus(message);
+      if (message.type === 'record_state') reportRecordingStatus({
+        recording_recorder_connected: message.recorder_connected,
+        recording_active: message.recording, recording_episode: message.episode,
+        recording_dataset_episode: message.dataset_episode,
+        recording_phase: message.phase, recording_recorder_ready: message.recorder_ready,
+        recording_saved_episode: message.saved_episode, recording_saved_frames: message.saved_frames,
+        recording_saved_dataset_episode: message.saved_dataset_episode,
+        recording_dataset_verified: message.dataset_verified,
+        recording_last_error: message.error,
+        recording_frames: message.frames, recording_dataset_root: message.dataset_root,
+        recording_dataset_frames: message.dataset_frames, recording_dataset_episodes: message.dataset_episodes,
+      });
       if (message.type === 'error') { status.textContent = message.error; logInput(message.error); }
+      if (message.type === 'ack' && message.for === 'record_toggle') {
+        if (message.status === 'recorder_unavailable') logInput('PC 录制端未连接，请先启动本地接收程序');
+        else if (message.status === 'recorder_not_ready') logInput('PC 录制端尚未就绪，请检查接收程序');
+        else if (message.status === 'saving') logInput('上一段正在保存，请等待 PC 确认成功');
+        else if (message.status === 'started' || message.status === 'stopped') {
+          reportRecordingStatus({ recording_active: message.recording, recording_episode: message.episode,
+            recording_dataset_episode: message.dataset_episode,
+            recording_phase: message.status === 'started' ? 'recording' : 'saving',
+            ...(message.status === 'started' ? { recording_last_error: null, recording_frames: 0 } : {}) });
+          logInput(message.status === 'started' ? '已开始录制' : '已停止录制，PC 保存中');
+        }
+      }
       if (message.type === 'ack' && (message.ignored || ['rejected', 'stale', 'ik_unavailable', 'unbound'].includes(message.status))) {
         const reason = message.reason === 'head_tracking_required' ? '请保持头部追踪并面向前方后握持' :
           message.ignored || message.reason || message.status;
@@ -321,6 +399,25 @@
     if (rb.length >= 5) return [3, 4];
     return [0, 1];
   }
+  // Quest 3 WebXR exposes Trigger, Grip, optional touchpad, Thumbstick, A/B
+  // (or X/Y) in the six-button layout used by this page. Keep this named so a
+  // headset/browser with a different layout can be adjusted without touching
+  // the existing A/B and Trigger mappings.
+  function thumbstickButtonIndex(buttons) {
+    // XR-standard keeps touchpad and thumbstick slots before the face buttons.
+    // Quest's six-button layout is [trigger, grip, touchpad, thumbstick, A, B],
+    // while the five-button layout omits the touchpad slot.
+    return buttons.length >= 6 ? 3 : (buttons.length >= 3 ? 2 : -1);
+  }
+  function handleRecordButton(left) {
+    const buttons = left?.gamepad?.buttons || [];
+    const index = thumbstickButtonIndex(buttons);
+    const pressedNow = index >= 0 && pressed(buttons[index], 0.5);
+    if (pressedNow && !prevRecord) {
+      if (send({ type: 'record_toggle' })) logInput('左摇杆按下：切换数据集录制');
+    }
+    prevRecord = pressedNow;
+  }
   function handleLiftButtons(right, t) {
     const rb = right?.gamepad?.buttons || [];
     const pressed = (button) => !!button && (button.pressed || button.value > 0.5);
@@ -354,9 +451,10 @@
     headPose = viewer ? poseArray(viewer.transform) : null;
     headPoseAt = viewer ? t : 0;
     const edge = readHands(frame, refSpace);
+    const left = hands.left.source;
+    handleRecordButton(left);
     if (t - lastControlSend <= CONTROL_PERIOD_MS && !edge) return;
     lastControlSend = t;
-    const left = hands.left.source;
     const right = hands.right.source;
     sendBaseFromSticks(left, right);
     const lb = left?.gamepad?.buttons || [];
@@ -520,8 +618,11 @@
     ctx.fillText(`左臂 ${$('left-state').textContent}    右臂 ${$('right-state').textContent}    ${$('feedback-state').textContent}`, 24, 90);
     ctx.fillStyle = '#a9bdd4';
     ctx.font = '21px sans-serif';
-    ctx.fillStyle = limitWarning ? '#fbbf24' : '#a9bdd4';
-    ctx.fillText(limitWarning || 'Grip 自动对齐并跟随 · Trigger 夹爪 · A 下降 / B 上升', 24, 140, 976);
+    const phase = $('recording-state').dataset.phase;
+    ctx.fillStyle = phase === 'recording' || phase === 'saving' ? '#fbbf24' :
+      phase === 'error' ? '#ff8c97' : phase === 'saved' ? '#73e4b7' : '#a9bdd4';
+    // Limit warnings already have their own VR plane; keep recording visible here.
+    ctx.fillText($('recording-state').textContent || 'Grip 自动对齐并跟随 · Trigger 夹爪 · A 下降 / B 上升', 24, 140, 976);
     dirtyTexture('hud-plane');
   }
   if (window.AFRAME) {

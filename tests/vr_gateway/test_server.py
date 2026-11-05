@@ -615,6 +615,260 @@ def test_release_hold_is_not_clamped_toward_old_leading_command():
     assert gateway.robot.sent[-1]["arm_left_shoulder_pan.pos"] == 0
 
 
+def test_record_toggle_requires_pc_and_reports_dataset_status():
+    gateway = VRGateway(_RobotStub(), VRGatewayConfig())
+    unavailable = gateway.process_message({"type": "record_toggle"})
+    assert unavailable["status"] == "recorder_unavailable"
+    assert gateway.status_payload()["recording_recorder_connected"] is False
+
+    gateway.set_recorder_connected(True)
+    gateway.update_recorder_status(
+        {
+            "type": "recorder_status",
+            "dataset_root": "/tmp/vr_dataset",
+            "dataset_repo_id": "vr/test",
+            "dataset_exists": False,
+            "dataset_frames": 0,
+            "dataset_episodes": 0,
+            "recorder_phase": "ready",
+        }
+    )
+    status = gateway.status_payload()
+    assert status["recording_recorder_connected"] is True
+    assert status["recording_dataset_root"] == "/tmp/vr_dataset"
+    assert status["recording_dataset_frames"] == 0
+    assert gateway.process_message({"type": "record_toggle"})["status"] == "started"
+    assert gateway.status_payload()["recording_active"] is True
+    assert gateway.process_message({"type": "record_toggle"})["status"] == "stopped"
+    assert gateway.status_payload()["recording_active"] is False
+
+
+def test_recording_metadata_uses_standard_hardware_feature_helpers():
+    robot = _RobotStub()
+    robot.name = "AlohaMiniRobot"
+    robot.action_features = {"joint.pos": float}
+    robot.observation_features = {"joint.pos": float, "forward": (2, 3, 3)}
+    gateway = VRGateway(robot, VRGatewayConfig(camera_names=("forward",), recording_fps=25))
+    metadata = gateway.recording_metadata()
+    assert metadata["fps"] == 25
+    assert metadata["robot_type"] == "AlohaMiniRobot"
+    assert metadata["dataset_features"]["action"]["names"] == ["joint.pos"]
+    assert metadata["dataset_features"]["observation.images.forward"]["shape"] == (2, 3, 3)
+
+
+def test_recording_sample_contains_complete_action_and_rejects_stale_camera():
+    robot = _RobotStub()
+    robot.action_features = {"arm_left_shoulder_pan.pos": float}
+    robot.observation_features = {"arm_left_shoulder_pan.pos": float, "forward": (4, 4, 3)}
+    camera = SimpleNamespace(
+        latest_timestamp=1.0,
+        read_latest=lambda **kwargs: np.zeros((4, 4, 3), dtype=np.uint8),
+    )
+    robot.cameras = {"forward": camera}
+    gateway = VRGateway(robot, VRGatewayConfig(camera_names=("forward",)))
+    gateway.capture_observation()
+    gateway.set_recorder_connected(True)
+    gateway.update_recorder_status({"recorder_phase": "ready"})
+    assert gateway.process_message({"type": "record_toggle"})["status"] == "started"
+    gateway._send({"arm_left_shoulder_pan.pos": 12.0})
+    sample = gateway.capture_recording_sample()
+    assert sample["action"]["arm_left_shoulder_pan.pos"] == 12.0
+    assert sample["frames"]["forward"]["jpeg_b64"]
+    with pytest.raises(RuntimeError, match="camera is stale"):
+        gateway.capture_recording_sample()
+
+
+def test_recording_skips_duplicate_camera_frame_and_resumes_when_camera_advances():
+    robot = _RobotStub()
+    robot.action_features = {"arm_left_shoulder_pan.pos": float}
+    camera = SimpleNamespace(
+        latest_timestamp=time.monotonic(),
+        read_latest=lambda **kwargs: np.zeros((4, 4, 3), dtype=np.uint8),
+    )
+    robot.cameras = {"wrist_right": camera}
+    gateway = VRGateway(robot, VRGatewayConfig(camera_names=("wrist_right",)))
+    gateway.capture_observation()
+    assert gateway.capture_recording_sample() is not None
+    # A camera running asynchronously can expose the same recent frame twice.
+    # This should skip one sample, not terminate the user's episode.
+    assert gateway.capture_recording_sample() is None
+    camera.latest_timestamp += 0.04
+    assert gateway.capture_recording_sample() is not None
+
+
+def test_recording_waits_for_matching_pc_save_confirmation():
+    gateway = VRGateway(_RobotStub(), VRGatewayConfig())
+    gateway.set_recorder_connected(True)
+    assert gateway.process_message({"type": "record_toggle"})["status"] == "recorder_not_ready"
+    gateway.update_recorder_status({"recorder_phase": "ready"})
+    started = gateway.process_message({"type": "record_toggle"})
+    episode = started["episode"]
+    gateway.note_recording_sample()
+    # Heartbeats must not reset an active recording to idle.
+    gateway.update_recorder_status({"recorder_phase": "ready"})
+    assert gateway.status_payload()["recording_phase"] == "recording"
+    gateway.process_message({"type": "record_toggle"})
+    assert gateway.status_payload()["recording_phase"] == "saving"
+    assert gateway.process_message({"type": "record_toggle"})["status"] == "saving"
+    gateway.update_recorder_status(
+        {
+            "recorder_phase": "saved",
+            "episode": episode - 1,
+            "saved_episode": episode - 1,
+            "saved_episode_frames": 1,
+        }
+    )
+    assert gateway.status_payload()["recording_phase"] == "saving"
+    gateway.update_recorder_status(
+        {
+            "recorder_phase": "saved",
+            "episode": episode,
+            "saved_episode": episode,
+            "saved_episode_frames": 1,
+            "dataset_frames": 1,
+            "dataset_episodes": 1,
+        }
+    )
+    assert gateway.status_payload()["recording_phase"] == "saved"
+    assert gateway.status_payload()["recording_saved_episode"] == episode
+    assert gateway.status_payload()["recording_saved_frames"] == 1
+    assert gateway.process_message({"type": "record_toggle"})["status"] == "started"
+
+
+def test_recording_save_failure_and_disconnect_are_not_idle():
+    gateway = VRGateway(_RobotStub(), VRGatewayConfig())
+    gateway.set_recorder_connected(True)
+    gateway.update_recorder_status({"recorder_phase": "ready"})
+    episode = gateway.process_message({"type": "record_toggle"})["episode"]
+    gateway.process_message({"type": "record_toggle"})
+    gateway.update_recorder_status({"recorder_phase": "error", "episode": episode, "error": "disk full"})
+    assert gateway.status_payload()["recording_phase"] == "error"
+    assert "disk full" in gateway.status_payload()["recording_last_error"]
+    gateway.set_recorder_connected(False)
+    assert "disk full" in gateway.status_payload()["recording_last_error"]
+
+
+def test_recorder_reconnect_clears_saved_message_and_uses_current_dataset_counts():
+    gateway = VRGateway(_RobotStub(), VRGatewayConfig())
+    gateway.set_recorder_connected(True)
+    gateway.update_recorder_status({"recorder_phase": "ready"})
+    episode = gateway.process_message({"type": "record_toggle"})["episode"]
+    gateway.note_recording_sample()
+    gateway.process_message({"type": "record_toggle"})
+    gateway.update_recorder_status(
+        {
+            "recorder_phase": "saved",
+            "episode": episode,
+            "saved_episode": episode,
+            "saved_episode_frames": 1,
+            "dataset_frames": 1,
+            "dataset_episodes": 1,
+        }
+    )
+    gateway.set_recorder_connected(False)
+    gateway.set_recorder_connected(True)
+    gateway.update_recorder_status(
+        {
+            "recorder_phase": "ready",
+            "dataset_frames": 0,
+            "dataset_episodes": 0,
+            "dataset_verified": True,
+        }
+    )
+    status = gateway.status_payload()
+    assert status["recording_phase"] == "idle"
+    assert status["recording_saved_episode"] is None
+    assert status["recording_dataset_episodes"] == 0
+
+
+def test_recording_displays_dataset_episode_after_gateway_restart():
+    gateway = VRGateway(_RobotStub(), VRGatewayConfig())
+    gateway.set_recorder_connected(True)
+    gateway.update_recorder_status(
+        {
+            "recorder_phase": "ready",
+            "dataset_verified": True,
+            "dataset_episodes": 5,
+            "dataset_frames": 100,
+        }
+    )
+    ack = gateway.process_message({"type": "record_toggle"})
+    assert ack["dataset_episode"] == 5
+    assert gateway.status_payload()["recording_dataset_episode"] == 5
+    assert gateway.status_payload()["recording_dataset_episodes"] == 5
+
+
+def test_recorder_startup_validation_error_is_reported_without_an_active_episode():
+    gateway = VRGateway(_RobotStub(), VRGatewayConfig())
+    gateway.set_recorder_connected(True)
+    gateway.update_recorder_status(
+        {
+            "recorder_phase": "error",
+            "episode": None,
+            "dataset_verified": False,
+            "error": "数据集校验失败：缺少数据文件",
+        }
+    )
+    status = gateway.status_payload()
+    assert status["recording_phase"] == "error"
+    assert status["recording_dataset_verified"] is False
+    assert "缺少数据文件" in status["recording_last_error"]
+    assert gateway.process_message({"type": "record_toggle"})["status"] == "recorder_not_ready"
+
+
+def test_recorder_websocket_propagates_saved_episode_to_health():
+    from fastapi.testclient import TestClient
+
+    from lerobot.vr_gateway.server import create_app
+
+    def receive_until(socket, predicate):
+        for _ in range(100):
+            message = socket.receive_json()
+            if predicate(message):
+                return message
+        pytest.fail("expected recording transition was not received")
+
+    robot = _RobotStub()
+    robot.action_features = {"arm_left_shoulder_pan.pos": float}
+    robot.observation_features = robot.action_features
+    with TestClient(create_app(robot, VRGatewayConfig())) as client:
+        with client.websocket_connect("/record") as obsolete:
+            obsolete.send_json({"type": "hello", "protocol": 1})
+            assert "版本不匹配" in obsolete.receive_json()["error"]
+        with client.websocket_connect("/record") as recorder:
+            recorder.send_json({"type": "hello", "protocol": 2, "dataset_root": "/tmp/vr-test"})
+            assert recorder.receive_json()["protocol"] == 2
+            recorder.send_json({"type": "recorder_status", "recorder_phase": "ready"})
+            deadline = time.monotonic() + 2
+            while not client.get("/health").json()["recording_recorder_ready"]:
+                assert time.monotonic() < deadline
+                time.sleep(0.01)
+            with client.websocket_connect("/ws") as operator:
+                operator.send_json({"type": "record_toggle"})
+                started = receive_until(operator, lambda m: m.get("for") == "record_toggle")
+                assert started["status"] == "started"
+                receive_until(recorder, lambda m: m["type"] == "sample")
+                operator.send_json({"type": "record_toggle"})
+                saving = receive_until(recorder, lambda m: m.get("phase") == "saving")
+                assert client.get("/health").json()["recording_phase"] == "saving"
+                recorder.send_json(
+                    {
+                        "type": "recorder_status",
+                        "recorder_phase": "saved",
+                        "episode": saving["episode"],
+                        "saved_episode": saving["episode"],
+                        "saved_episode_frames": saving["frames"],
+                        "dataset_frames": saving["frames"],
+                        "dataset_episodes": 1,
+                    }
+                )
+                receive_until(recorder, lambda m: m.get("phase") == "saved")
+                health = client.get("/health").json()
+                assert health["recording_phase"] == "saved"
+                assert health["recording_saved_frames"] == saving["frames"]
+                assert health["recording_dataset_root"] == "/tmp/vr-test"
+
+
 def test_incomplete_feedback_release_uses_last_measured_position_not_leading_goal():
     gateway = _session_gateway()
     gateway.process_message(_arm(left=0))

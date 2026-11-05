@@ -127,6 +127,10 @@ viz = [
     "rerun-sdk>=0.24.0,<0.34.0",
     "foxglove-sdk>=0.25.1,<0.26.0",
 ]
+vr = [
+    "fastapi>=0.115.0,<1.0.0",
+    "uvicorn[standard]>=0.34.0,<1.0.0",
+]
 # ── User-facing composite extras (map to CLI scripts) ─────
 # lerobot-record, lerobot-replay, lerobot-calibrate, lerobot-teleoperate, etc.
 core_scripts = ["lerobot[dataset]", "lerobot[hardware]", "lerobot[viz]"]

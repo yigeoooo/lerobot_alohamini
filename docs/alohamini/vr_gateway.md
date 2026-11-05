@@ -95,6 +95,81 @@ python -m lerobot.vr_gateway.server --robot-model alohamini2pro --arm-ik-mode le
 
 优先使用稳定的 `/dev/am_camera_*` 设备别名。传入参数的相机需已连接且支持上述 MJPEG 采集格式；打开失败时会报告启动错误，应核对设备路径和格式。未传参数的相机不需要接入。三路在真实树莓派和 Quest 上的帧率、USB 带宽与画面方向仍需实机核对。
 
+## VR 数据集录制（PC 本地写盘）
+
+录制端运行在 PC，树莓派只负责机器人控制、状态采样和相机采样。PC 通过独立的
+`/record` WebSocket 接收完整动作、状态和三路 JPEG，再用项目的
+`hw_to_dataset_features`、`build_dataset_frame` 和 `LeRobotDataset` 写入本地视频与
+parquet。因此录制格式和主从臂 `record_bi.py` 相同，可以继续使用真机回放和可视化回放。
+
+先在树莓派启动网关，并启用三路 VR 相机：
+
+```bash
+python -m lerobot.vr_gateway.server --robot-model alohamini2pro --arm-ik-mode legacy \
+  --head-camera --left-wrist-camera --right-wrist-camera \
+  --host 0.0.0.0 --port 8000 --recording-fps 25
+```
+
+再在 PC 启动接收端（`--dataset.root` 是 PC 的实际目录；网关需已启动，接收端不自动重连）：
+
+```bash
+uv sync --extra vr --extra dataset
+uv run python examples/alohamini/record_vr.py \
+  --gateway-url ws://192.168.10.106:8000 \
+  --dataset.repo_id vr_alohamini \
+  --dataset.root /data/lerobot/vr_alohamini \
+  --dataset.single_task "VR 摇操任务" \
+  --dataset.fps 25
+```
+
+PC 接收端连接成功后，Web 页面会显示 `PC 在线`、数据集绝对路径、当前帧数和 episode
+数；新数据集显示 0。初始化期间显示 `PC 正在核对磁盘数据`，核对完成才能开始录制。
+左手柄摇杆第一次按下开始当前 episode，第二次按下停止并保存。桌面与 VR HUD 使用同一状态：
+
+- `录制中`：持续显示本集帧数，普通心跳或限位警告不会覆盖此提示。
+- `PC 保存中`：停止采样后等待 PC 编码视频、写入数据并关闭 Parquet 文件；此时再次按键不会开始下一集。
+- `Ep N 保存成功`：PC 已明确确认该段写盘完成，显示该段帧数及数据集已保存的总帧数、集数。
+  确认与当前 episode 和发送帧数匹配后才生效，并保持显示到下一次录制。
+- `录制中断` / `录制 / 保存失败`：显示相机、网络或 PC 写盘错误。连接断开时，未收到回执的保存结果会标为未确认。
+
+相机短暂尚未更新时跳过该次采样，继续显示 `录制中`，不把重复图像写入数据集。
+相机真正断流或帧超过 500 ms 未更新时才停止，并尝试保存此前收到的完整样本；
+即使部分样本保存成功，中断原因也会继续显示。PC 心跳在视频处理和保存期间持续发送。
+
+PC 启动、每段保存完成、重新打开写入器继续录制时，都会从磁盘重新统计 episode 索引和
+Parquet 数据帧数，检查所需视频文件存在且非空，并与 `meta/info.json` 的条数和帧数交叉核对。
+显示的总数只包含已完成保存并通过核对的数据；核对期间继续发送心跳。文件缺失或计数不一致
+会显示具体错误并阻止继续录制，不自动改写已有数据。
+
+退出并重开 PC 接收端会清除上一连接的保存提示，重新显示 `已核对 N 条 / M 帧`。
+界面的 `Ep` 使用数据集实际编号，从 0 开始，与回放的 episode 参数一致；例如已有 3 条时，
+下一段显示 `Ep 3`，保存后总数显示 4 条。网关重启不会让显示编号重新从 1 开始。
+
+录制协议已更新为版本 2。更新后需重启树莓派网关和 PC 接收端，并刷新 Quest 页面，
+确认加载 `/static/app.js?v=20261105-recording4`。旧版接收端会收到版本不匹配提示。
+`--gateway-url` 填网关基础地址，脚本自动追加 `/record`。
+
+生成数据后可在 PC 上用现有工具检查：
+
+```bash
+uv run python examples/alohamini/replay_bi.py \
+  --dataset.repo_id vr_alohamini \
+  --dataset.root /data/lerobot/vr_alohamini \
+  --dataset.episode 0 \
+  --robot.remote_ip 192.168.10.106 \
+  --robot.robot_model alohamini2pro
+```
+
+可视化回放沿用项目命令：
+
+```bash
+lerobot-dataset-viz --repo-id vr_alohamini --root /data/lerobot/vr_alohamini \
+  --episode-index 0 --display-compressed-images
+```
+
+首次接入建议先录一小段，
+确认页面帧数递增、停止后 episode 落盘，再进行连续采集。
+
 ## 首次使用：Folded Home 零位流程
 
 这一步补充软件零位，保留现有电机行程，不写 EEPROM。机械安装、编码器零偏或标定范围发生变化后需要重新核对/采集；日常启动复用文件，不要求每次摆回 Home。头显 Y 对齐和 Grip 锚点不能替代机械参考。

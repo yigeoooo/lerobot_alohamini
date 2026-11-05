@@ -181,6 +181,101 @@ test('Trigger defaults closed, opens while pressed, closes on release; Grip stay
   assert.ok(ui.last('arm_pose').left_epoch > epoch);
 });
 
+test('left thumbstick click toggles recording once per press in Quest six-button layout', () => {
+  const ui = browser();
+  ui.step();
+  ui.button('left', 3, 1);
+  ui.step();
+  assert.equal(ui.packets.filter((packet) => packet.type === 'record_toggle').length, 1);
+  ui.step();
+  ui.step();
+  assert.equal(ui.packets.filter((packet) => packet.type === 'record_toggle').length, 1);
+  ui.button('left', 3, 0);
+  ui.step();
+  ui.button('left', 3, 1);
+  ui.step();
+  assert.equal(ui.packets.filter((packet) => packet.type === 'record_toggle').length, 2);
+});
+
+test('left thumbstick click uses index 2 when the optional touchpad slot is omitted', () => {
+  const ui = browser();
+  ui.sources[0].gamepad.buttons = Array.from({ length: 5 }, () => ({ value: 0, pressed: false }));
+  ui.step();
+  ui.button('left', 2, 1);
+  ui.step();
+  assert.equal(ui.packets.filter((packet) => packet.type === 'record_toggle').length, 1);
+});
+
+test('recording health shows PC connection, path and dataset frame count', () => {
+  const ui = browser();
+  ui.status({ recording_recorder_connected: true, recording_dataset_root: '/data/vr',
+    recording_dataset_frames: 42, recording_dataset_episodes: 2, recording_active: false });
+  assert.match(ui.element('recording-state').textContent, /PC 在线/);
+  assert.match(ui.element('recording-state').textContent, /42 帧/);
+  assert.match(ui.element('recording-state').textContent, /\/data\/vr/);
+  ui.status({ recording_recorder_connected: true, recording_dataset_root: '/data/vr',
+    recording_dataset_frames: 42, recording_dataset_episodes: 2, recording_active: true,
+    recording_episode: 3, recording_frames: 5 });
+  assert.match(ui.element('recording-state').textContent, /录制中/);
+  assert.match(ui.element('recording-state').textContent, /本集 5 帧/);
+});
+
+test('recording remains visible in the HUD even with joint limit warnings', () => {
+  const ui = browser();
+  ui.status({ recording_recorder_connected: true, recording_active: true,
+    recording_phase: 'recording', recording_episode: 7, recording_frames: 15,
+    joint_limit_warnings: [{ side: 'left', joint: 'elbow_flex', bound: 'upper' }] });
+  assert.match(ui.element('recording-state').textContent, /录制中/);
+  assert.ok(ui.drawings.some(({ method, args }) => method === 'fillText' && args[2] === 140 && /录制中/.test(args[0])));
+});
+
+test('saving and confirmed save stay distinct from PC online', () => {
+  const ui = browser();
+  const state = { recording_recorder_connected: true, recording_episode: 7, recording_active: false };
+  ui.status({ ...state, recording_phase: 'saving' });
+  assert.match(ui.element('recording-state').textContent, /保存中/);
+  assert.doesNotMatch(ui.element('recording-state').textContent, /PC 在线/);
+  ui.status({ ...state, recording_phase: 'saved', recording_saved_episode: 7, recording_saved_frames: 50 });
+  assert.match(ui.element('recording-state').textContent, /Ep 7.*保存成功.*50 帧/);
+  ui.status({ ...state, recording_phase: 'saved', recording_saved_episode: 7, recording_saved_frames: 50 });
+  assert.match(ui.element('recording-state').textContent, /保存成功/);
+});
+
+test('interrupted recording and PC write errors never look like idle', () => {
+  const ui = browser();
+  ui.status({ recording_recorder_connected: true, recording_active: false,
+    recording_phase: 'saving', recording_last_error: 'sample_failed: camera unavailable' });
+  assert.match(ui.element('recording-state').textContent, /录制中断.*保存中/);
+  ui.status({ recording_recorder_connected: true, recording_active: false,
+    recording_phase: 'error', recording_last_error: 'disk full' });
+  assert.match(ui.element('recording-state').textContent, /失败.*disk full/);
+  assert.doesNotMatch(ui.element('recording-state').textContent, /PC 在线/);
+});
+
+test('reconnecting checks disk before displaying counts and clears the old saved message', () => {
+  const ui = browser();
+  ui.status({ recording_recorder_connected: true, recording_phase: 'saved', recording_saved_episode: 7,
+    recording_saved_dataset_episode: 2, recording_saved_frames: 50, recording_dataset_episodes: 3,
+    recording_dataset_frames: 150, recording_dataset_verified: true });
+  ui.status({ recording_recorder_connected: true, recording_phase: 'checking',
+    recording_saved_episode: null, recording_saved_dataset_episode: null, recording_dataset_verified: false,
+    recording_dataset_episodes: 0, recording_dataset_frames: 0 });
+  assert.match(ui.element('recording-state').textContent, /核对磁盘/);
+  assert.doesNotMatch(ui.element('recording-state').textContent, /保存成功|0 条|3 条/);
+  ui.status({ recording_recorder_connected: true, recording_recorder_ready: true, recording_phase: 'idle',
+    recording_dataset_verified: true, recording_dataset_episodes: 3, recording_dataset_frames: 150 });
+  assert.match(ui.element('recording-state').textContent, /已核对 3 条 \/ 150 帧/);
+  assert.doesNotMatch(ui.element('recording-state').textContent, /保存成功/);
+});
+
+test('recording shows the actual dataset episode rather than the connection counter', () => {
+  const ui = browser();
+  ui.status({ recording_recorder_connected: true, recording_phase: 'recording', recording_active: true,
+    recording_episode: 1, recording_dataset_episode: 5, recording_dataset_episodes: 5,
+    recording_dataset_frames: 100, recording_dataset_verified: true });
+  assert.match(ui.element('recording-state').textContent, /Ep 5.*已保存 5 条 \/ 100 帧/);
+});
+
 test('both triggers independently open proportionally and repeat targets until released', () => {
   const ui = browser();
   ui.step();

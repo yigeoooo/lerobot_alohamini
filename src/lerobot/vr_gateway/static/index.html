@@ -4,9 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>AlohaMini · VR Teleoperation</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20261103-safety1">
+  <link rel="stylesheet" href="/static/styles.css?v=20261105-recording4">
   <script src="/static/vendor/aframe-1.7.1.min.js"></script>
-  <script src="/static/app.js?v=20261103-safety1" defer></script>
+  <script src="/static/app.js?v=20261105-recording4" defer></script>
 </head>
 <body>
 <div id="limit-warning" class="limit-warning" role="alert" hidden></div>
@@ -43,6 +43,7 @@
         <article><span class="arm-label">R / 右臂</span><strong id="right-state">等待状态</strong><p id="right-detail">连接未知 · 力矩未知</p></article>
       </div>
       <div class="health-row"><span id="mapping-state">标定待检查</span><span id="feedback-state">反馈待检查</span></div>
+      <p id="recording-state" class="recording-state">PC 录制端未连接</p>
       <button id="vr" class="primary wide">进入 VR</button>
       <div class="button-row"><button id="clutch">暂停跟随</button><button id="align">重新对齐 / Y</button><button id="reanchor">重建锚点</button></div>
       <div class="emergency-row"><button id="estop" class="danger">急停</button><button id="reset-estop" class="outline">解除急停</button></div>
@@ -55,6 +56,7 @@
       <article><kbd>Trigger</kbd><h3>按住打开，松开闭合</h3><p>夹爪默认闭合，食指扳机按得越深打开越大。无需同时按住 Grip。</p></article>
       <article><kbd>自动对齐 · Y</kbd><h3>朝向对齐</h3><p>开始握持时自动对齐头部朝向；中途加入的手沿用同一方向。双手松开后重新对齐，Y 可手动重置。</p></article>
       <article><kbd>摇杆 · A / B</kbd><h3>底盘与升降</h3><p>左摇杆前后与横移，右摇杆转向；A 下降，B 上升。机械臂跟随时互锁。</p></article>
+      <article><kbd>左摇杆按下</kbd><h3>数据集录制</h3><p>PC 录制端在线后，按一下开始，按第二下停止并保存当前 episode。面板显示 PC 路径和已保存帧数。</p></article>
     </div>
   </section>
   <section class="manual card">

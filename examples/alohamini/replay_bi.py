@@ -113,6 +113,14 @@ try:
 
         if args.verbose_actions:
             print(f"replay_bi.action:{action}")
+        robot.get_observation(include_cameras=False)
+
+        # if not robot.feedback_fresh:
+        #     raise RuntimeError("机器人状态反馈无效")
+
+        # if not robot.command_permitted:
+        #     raise RuntimeError("没有机器人控制权限")
+
         robot.send_action(action)
 
         # Schedule against an absolute deadline so occasional slow iterations do not
